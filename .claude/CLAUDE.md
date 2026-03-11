@@ -1,0 +1,1 @@
+/mnt/storage/workspace/projects/my_task_bar/CLAUDE.md
