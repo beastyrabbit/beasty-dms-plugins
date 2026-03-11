@@ -191,8 +191,13 @@ PanelWindow {
                         id: popupHover
                         anchors.fill: parent
                         hoverEnabled: true
+                        acceptedButtons: Qt.LeftButton
                         onEntered: countdownAnim.pause()
                         onExited: countdownAnim.resume()
+                        onClicked: {
+                            NotificationService.activateNotification(popupWrapper.modelData)
+                            NotificationService.removePopupById(popup._notifId)
+                        }
                     }
 
                     Row {
