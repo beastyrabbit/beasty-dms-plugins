@@ -11,9 +11,12 @@ Singleton {
     property bool panelHovered: false
     property bool bellHovered: false
     property var popupNotifications: []
+    property var _queue: []
     property var _unreadIds: ({})
     property var _creationTimes: ({})
     property int unreadCount: 0
+
+    readonly property int maxVisible: 10
 
     readonly property alias tracked: server.trackedNotifications
     readonly property int count: tracked ? tracked.count : 0
@@ -33,11 +36,35 @@ Singleton {
             var times = root._creationTimes
             times[notification.id] = Date.now()
             root._creationTimes = times
-            // Show as floating popup
-            var popups = root.popupNotifications.slice()
-            popups.unshift(notification)
-            if (popups.length > 5) popups = popups.slice(0, 5)
-            root.popupNotifications = popups
+
+            if (root.popupNotifications.length < root.maxVisible) {
+                var popups = root.popupNotifications.slice()
+                popups.unshift(notification)
+                root.popupNotifications = popups
+            } else {
+                // Queue overflow
+                var q = root._queue.slice()
+                q.push(notification)
+                root._queue = q
+            }
+        }
+    }
+
+    // Discard queued notifications older than 20s
+    Timer {
+        id: queueCleanup
+        interval: 2000
+        repeat: true
+        running: root._queue.length > 0
+
+        onTriggered: {
+            var now = Date.now()
+            var q = root._queue.filter(function(n) {
+                var t = root._creationTimes[n.id]
+                return t && (now - t) < 20000
+            })
+            if (q.length !== root._queue.length)
+                root._queue = q
         }
     }
 
@@ -100,17 +127,40 @@ Singleton {
         return Math.max(0, 10000 - (Date.now() - t))
     }
 
+    // Remove popup by ID — promote queued item if available
+    function removePopupById(notifId) {
+        var times = root._creationTimes
+        delete times[notifId]
+        root._creationTimes = times
+
+        var nid = String(notifId)
+        var popups = root.popupNotifications.filter(function(n) {
+            return String(n.id) !== nid
+        })
+
+        // Promote from queue if there's space
+        if (popups.length < root.maxVisible && root._queue.length > 0) {
+            var q = root._queue.slice()
+            var next = q.shift()
+            root._queue = q
+            // Reset creation time so it gets a fresh 10s
+            times = root._creationTimes
+            times[next.id] = Date.now()
+            root._creationTimes = times
+            popups.unshift(next)
+        }
+
+        root.popupNotifications = popups
+    }
+
     // Popup expired naturally — stays tracked as unread in panel
     function removePopup(notif) {
-        var times = root._creationTimes
-        delete times[notif.id]
-        root._creationTimes = times
-        root.popupNotifications = root.popupNotifications.filter(n => n !== notif)
+        root.removePopupById(notif.id)
     }
 
     // User explicitly dismissed — remove from everything
     function dismissNotification(notif) {
-        removePopup(notif)
+        root.removePopupById(notif.id)
         var ids = root._unreadIds
         delete ids[notif.id]
         root._unreadIds = ids
@@ -120,6 +170,7 @@ Singleton {
 
     function dismissAll() {
         root.popupNotifications = []
+        root._queue = []
         root._unreadIds = ({})
         root.unreadCount = 0
         for (var i = server.trackedNotifications.count - 1; i >= 0; i--) {

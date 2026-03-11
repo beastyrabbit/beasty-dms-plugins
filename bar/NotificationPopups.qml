@@ -62,9 +62,10 @@ PanelWindow {
         id: popupBody
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.topMargin: root.hasPopups ? 0 : -height
+        anchors.topMargin: root.hasPopups ? 0 : -targetHeight
         width: 392
-        height: popupList.contentHeight + 16
+        property real targetHeight: popupList.contentHeight + 16
+        height: targetHeight
         clip: true
 
         color: Theme.panelBg
@@ -75,6 +76,9 @@ PanelWindow {
         bottomLeftRadius: 28
         bottomRightRadius: 0
 
+        Behavior on targetHeight {
+            NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutCubic }
+        }
         Behavior on anchors.topMargin {
             NumberAnimation { duration: 700; easing.type: Easing.OutCubic }
         }
@@ -145,14 +149,16 @@ PanelWindow {
                     border.width: 1
 
                     property real timerProgress: 1.0
+                    property var _notifId
 
                     // Start off-screen right
                     x: parent.width
 
                     Component.onCompleted: {
-                        var remaining = NotificationService.getRemainingMs(popupWrapper.modelData.id)
+                        popup._notifId = popupWrapper.modelData.id
+                        var remaining = NotificationService.getRemainingMs(popup._notifId)
                         if (remaining <= 0) {
-                            NotificationService.removePopup(popupWrapper.modelData)
+                            NotificationService.removePopupById(popup._notifId)
                             return
                         }
                         popup.timerProgress = remaining / 10000
@@ -178,7 +184,7 @@ PanelWindow {
                         property: "timerProgress"
                         to: 0.0
                         running: false
-                        onFinished: NotificationService.removePopup(popupWrapper.modelData)
+                        onFinished: NotificationService.removePopupById(popup._notifId)
                     }
 
                     MouseArea {
@@ -266,10 +272,31 @@ PanelWindow {
                             }
 
                             MouseArea {
+                                id: iconHover
                                 anchors.fill: parent
-                                z: 3
+                                z: 4
+                                hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: NotificationService.dismissNotification(popupWrapper.modelData)
+                                onClicked: NotificationService.removePopupById(popup._notifId)
+
+                                Rectangle {
+                                    anchors.fill: parent
+                                    radius: iconBox.radius
+                                    color: "#cc000000"
+                                    opacity: iconHover.containsMouse ? 1 : 0
+
+                                    Behavior on opacity {
+                                        NumberAnimation { duration: Theme.animFast }
+                                    }
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "󰅖"
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: 20
+                                        color: Theme.red
+                                    }
+                                }
                             }
                         }
 
