@@ -15,8 +15,106 @@ Singleton {
     property var _unreadIds: ({})
     property int unreadCount: 0
 
+    property bool stackByApp: true
+    property var _expandedApps: ({})
+
+    property var displayNotifications: {
+        var notifs = NotificationStore.notifications
+        var stacked = root.stackByApp
+        var expanded = root._expandedApps
+
+        if (!stacked) return notifs
+
+        var groups = {}
+        var groupOrder = []
+        for (var i = 0; i < notifs.length; i++) {
+            var n = notifs[i]
+            var key = n.desktopEntry || n.appName || ""
+            if (!groups[key]) {
+                groups[key] = []
+                groupOrder.push(key)
+            }
+            groups[key].push(n)
+        }
+
+        var result = []
+        for (var g = 0; g < groupOrder.length; g++) {
+            var gKey = groupOrder[g]
+            var items = groups[gKey]
+            if (items.length === 1) {
+                result.push(items[0])
+            } else if (expanded[gKey]) {
+                result.push({
+                    _isGroupHeader: true,
+                    appKey: gKey,
+                    appName: items[0].appName || gKey,
+                    appIcon: items[0].appIcon,
+                    desktopEntry: items[0].desktopEntry,
+                    image: items[0].image,
+                    count: items.length,
+                    time: items[0].time,
+                    id: "header_" + gKey
+                })
+                for (var j = 0; j < items.length; j++) {
+                    result.push(items[j])
+                }
+            } else {
+                result.push({
+                    _isStack: true,
+                    appKey: gKey,
+                    appName: items[0].appName || gKey,
+                    appIcon: items[0].appIcon,
+                    desktopEntry: items[0].desktopEntry,
+                    image: items[0].image,
+                    count: items.length,
+                    summary: items[0].summary,
+                    body: items[0].body,
+                    time: items[0].time,
+                    id: "stack_" + gKey
+                })
+            }
+        }
+        return result
+    }
+
     readonly property int maxVisible: 10
     property bool _ready: false
+    property string hoveredPopupId: ""
+    property var _pendingRemovals: []
+
+    onHoveredPopupIdChanged: {
+        if (hoveredPopupId === "" && _pendingRemovals.length > 0) {
+            // Sort pending by position in list — bottom (highest index) first
+            var popups = root.popupNotifications
+            root._pendingRemovals = root._pendingRemovals.slice().sort(function(a, b) {
+                var idxA = -1, idxB = -1
+                for (var i = 0; i < popups.length; i++) {
+                    if (String(popups[i].id) === a) idxA = i
+                    if (String(popups[i].id) === b) idxB = i
+                }
+                return idxB - idxA
+            })
+            cascadeTimer.start()
+        } else if (hoveredPopupId !== "") {
+            cascadeTimer.stop()
+        }
+    }
+
+    Timer {
+        id: cascadeTimer
+        interval: 750
+        repeat: true
+        onTriggered: {
+            if (root._pendingRemovals.length > 0) {
+                var pending = root._pendingRemovals.slice()
+                var nid = pending.shift()
+                root._pendingRemovals = pending
+                root.removePopupById(nid)
+            } else {
+                cascadeTimer.stop()
+            }
+        }
+    }
 
     // Skip popups during startup — server re-sends tracked notifications on reload.
     // Waits for store to load so dismissed notifications stay dismissed.
@@ -62,6 +160,20 @@ Singleton {
             if (root.popupNotifications.length < root.maxVisible) {
                 var popups = root.popupNotifications.slice()
                 popups.unshift(notification)
+
+                // Keep hovered item at its original position
+                if (root.hoveredPopupId !== "") {
+                    var hid = root.hoveredPopupId
+                    for (var i = 2; i < popups.length; i++) {
+                        if (String(popups[i].id) === hid) {
+                            var temp = popups[i]
+                            popups[i] = popups[i - 1]
+                            popups[i - 1] = temp
+                            break
+                        }
+                    }
+                }
+
                 root.popupNotifications = popups
             } else {
                 // Queue overflow
@@ -74,7 +186,7 @@ Singleton {
         }
     }
 
-    // Discard queued notifications older than 20s
+    // Discard queued popup notifications older than 20s
     Timer {
         id: queueCleanup
         interval: 2000
@@ -154,6 +266,15 @@ Singleton {
     // Remove popup by ID — promote queued item if available
     function removePopupById(notifId) {
         var nid = String(notifId)
+
+        // If any popup is hovered, queue this removal for later
+        if (root.hoveredPopupId !== "") {
+            var pending = root._pendingRemovals.slice()
+            if (pending.indexOf(nid) === -1) pending.push(nid)
+            root._pendingRemovals = pending
+            return
+        }
+
         var popups = root.popupNotifications.filter(function(n) {
             return String(n.id) !== nid
         })
@@ -197,6 +318,29 @@ Singleton {
                 }
             }
         }
+    }
+
+    function dismissAppStack(appKey) {
+        var notifs = NotificationStore.notifications
+        for (var i = notifs.length - 1; i >= 0; i--) {
+            var n = notifs[i]
+            var key = n.desktopEntry || n.appName || ""
+            if (key === appKey) {
+                root.removePopupById(n.id)
+                var ids = root._unreadIds
+                delete ids[n.id]
+                root._unreadIds = ids
+                NotificationStore.remove(n.id)
+                // Dismiss from server
+                for (var j = server.trackedNotifications.count - 1; j >= 0; j--) {
+                    if (String(server.trackedNotifications.get(j).id) === String(n.id)) {
+                        server.trackedNotifications.get(j).dismiss()
+                        break
+                    }
+                }
+            }
+        }
+        root._recountUnread()
     }
 
     function formatAge(timestamp) {
@@ -249,6 +393,21 @@ Singleton {
             var appLower = app.toLowerCase()
             Quickshell.execDetached(["niri", "msg", "action", "focus-window", "--app-id", appLower])
         }
+    }
+
+    function toggleStacking() {
+        root.stackByApp = !root.stackByApp
+        root._expandedApps = ({})
+    }
+
+    function toggleAppExpanded(appKey) {
+        var e = root._expandedApps
+        if (e[appKey]) {
+            delete e[appKey]
+        } else {
+            e[appKey] = true
+        }
+        root._expandedApps = e
     }
 
     function dismissAll() {

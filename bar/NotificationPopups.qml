@@ -76,6 +76,23 @@ PanelWindow {
         bottomLeftRadius: 28
         bottomRightRadius: 0
 
+        HoverHandler {
+            id: bodyHoverHandler
+            onHoveredChanged: {
+                if (!hovered) {
+                    unhoverDelayTimer.start()
+                } else {
+                    unhoverDelayTimer.stop()
+                }
+            }
+        }
+
+        Timer {
+            id: unhoverDelayTimer
+            interval: 1000
+            onTriggered: NotificationService.hoveredPopupId = ""
+        }
+
         Behavior on targetHeight {
             NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutCubic }
         }
@@ -114,6 +131,7 @@ PanelWindow {
                 width: popupList.width
                 height: popup.height
                 clip: true
+                z: popup.isHovered ? 100 : 0
 
                 ListView.onRemove: removeAnim.start()
 
@@ -144,12 +162,30 @@ PanelWindow {
                     width: parent.width
                     height: popupContent.implicitHeight + 16
                     radius: 16
-                    color: popupHover.containsMouse ? Theme.cardHover : Theme.cardBg
-                    border.color: popupHover.containsMouse ? Theme.border : "transparent"
+                    color: isHovered ? Theme.cardHover : Theme.cardBg
+                    border.color: isHovered ? Theme.border : "transparent"
                     border.width: 1
 
                     property real timerProgress: 1.0
                     property var _notifId
+                    property bool isHovered: hoverHandler.hovered || String(popup._notifId) === NotificationService.hoveredPopupId
+
+                    onIsHoveredChanged: {
+                        if (isHovered) {
+                            NotificationService.hoveredPopupId = String(popup._notifId)
+                        }
+                    }
+
+                    HoverHandler {
+                        id: hoverHandler
+                    }
+
+                    TapHandler {
+                        onTapped: {
+                            NotificationService.activateNotification(popupWrapper.modelData)
+                            NotificationService.dismissNotification(popupWrapper.modelData)
+                        }
+                    }
 
                     // Start off-screen right
                     x: parent.width
@@ -185,19 +221,6 @@ PanelWindow {
                         to: 0.0
                         running: false
                         onFinished: NotificationService.removePopupById(popup._notifId)
-                    }
-
-                    MouseArea {
-                        id: popupHover
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        acceptedButtons: Qt.LeftButton
-                        onEntered: countdownAnim.pause()
-                        onExited: countdownAnim.resume()
-                        onClicked: {
-                            NotificationService.activateNotification(popupWrapper.modelData)
-                            NotificationService.dismissNotification(popupWrapper.modelData)
-                        }
                     }
 
                     Row {

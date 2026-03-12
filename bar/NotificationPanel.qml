@@ -38,7 +38,6 @@ PanelWindow {
             var r = width
             ctx.clearRect(0, 0, r, r)
             ctx.fillStyle = Theme.panelBg
-            // Circle center at bottom-left, fill the outer part (top-right spandrel)
             ctx.beginPath()
             ctx.moveTo(0, 0)
             ctx.lineTo(r, 0)
@@ -96,12 +95,36 @@ PanelWindow {
             spacing: 12
 
             // Header
-            Text {
-                text: "Notifications"
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.fontSize + 1
-                font.bold: true
-                color: Theme.text
+            Row {
+                width: parent.width
+
+                Text {
+                    text: "Notifications"
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontSize + 1
+                    font.bold: true
+                    color: Theme.text
+                    width: parent.width - stackToggle.width
+                }
+
+                Text {
+                    id: stackToggle
+                    visible: NotificationStore.count > 1
+                    text: NotificationService.stackByApp ? "󰁅" : "󰁍"
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontSize + 2
+                    color: stackToggleArea.containsMouse ? Theme.text : Theme.dimText
+
+                    Behavior on color { ColorAnimation { duration: Theme.animFast } }
+
+                    MouseArea {
+                        id: stackToggleArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: NotificationService.toggleStacking()
+                    }
+                }
             }
 
             // Separator
@@ -136,7 +159,7 @@ PanelWindow {
                 }
             }
 
-            // Notification list — scrollable with fly-out dismiss
+            // Notification list
             ListView {
                 id: notifList
                 width: parent.width
@@ -147,20 +170,20 @@ PanelWindow {
                 spacing: 4
 
                 model: ScriptModel {
-                    values: NotificationStore.notifications
+                    values: NotificationService.displayNotifications
                 }
 
-                // Smooth reflow when items are removed
                 displaced: Transition {
                     NumberAnimation { property: "y"; duration: Theme.animNormal; easing.type: Easing.OutCubic }
                 }
 
-                // Reset scroll to top when panel opens
                 Connections {
                     target: NotificationService
                     function onPanelVisibleChanged() {
-                        if (NotificationService.panelVisible)
+                        if (NotificationService.panelVisible) {
+                            NotificationService._expandedApps = ({})
                             notifList.positionViewAtBeginning()
+                        }
                     }
                 }
 
@@ -170,11 +193,14 @@ PanelWindow {
                     required property var modelData
                     required property int index
 
+                    property bool isStack: !!modelData._isStack
+                    property bool isGroupHeader: !!modelData._isGroupHeader
+                    property bool isRegular: !isStack && !isGroupHeader
+
                     width: notifList.width
                     height: delegateContent.implicitHeight
                     clip: true
 
-                    // Fly-out on removal
                     ListView.onRemove: removeAnim.start()
 
                     SequentialAnimation {
@@ -204,14 +230,20 @@ PanelWindow {
                         width: parent.width
                         spacing: 4
 
-                        // Date group separator (hidden for today's notifications)
+                        // Date group separator (regular items only)
                         Text {
                             visible: {
+                                if (delegateWrapper.isGroupHeader || delegateWrapper.isStack) return false
                                 var myGroup = NotificationService.getTimeGroup(delegateWrapper.modelData.time)
                                 if (myGroup === "") return false
                                 if (delegateWrapper.index === 0) return true
-                                var prev = NotificationStore.get(delegateWrapper.index - 1)
-                                return prev && myGroup !== NotificationService.getTimeGroup(prev.time)
+                                var display = NotificationService.displayNotifications
+                                if (delegateWrapper.index > 0) {
+                                    var prev = display[delegateWrapper.index - 1]
+                                    if (!prev || prev._isGroupHeader || prev._isStack) return true
+                                    return myGroup !== NotificationService.getTimeGroup(prev.time)
+                                }
+                                return false
                             }
                             text: NotificationService.getTimeGroup(delegateWrapper.modelData.time)
                             font.family: Theme.fontFamily
@@ -220,28 +252,78 @@ PanelWindow {
                             topPadding: delegateWrapper.index === 0 ? 0 : 4
                         }
 
-                        Rectangle {
-                            id: notifItem
-
+                        // Group header (expanded group label)
+                        Item {
+                            visible: delegateWrapper.isGroupHeader
                             width: delegateContent.width
-                            height: notifContent.implicitHeight + 16
+                            height: 28
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: 10
+                                color: Theme.cardBg
+                            }
+
+                            Row {
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                spacing: 6
+
+                                Text {
+                                    text: (delegateWrapper.modelData.appName || "") + "  ·  " + (delegateWrapper.modelData.count || 0)
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontSize - 2
+                                    font.bold: true
+                                    color: Theme.dimText
+                                }
+
+                                Text {
+                                    text: "󰅀"
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontSize
+                                    color: Theme.dimText
+                                }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: NotificationService.toggleAppExpanded(delegateWrapper.modelData.appKey)
+                            }
+                        }
+
+                        // Notification card (regular or stack)
+                        Rectangle {
+                            id: cardRect
+                            visible: !delegateWrapper.isGroupHeader
+                            width: delegateContent.width
+                            height: cardContent.implicitHeight + 16
                             radius: 16
-                            color: itemHover.containsMouse ? Theme.cardHover : Theme.cardBg
-                            border.color: itemHover.containsMouse ? Theme.border : "transparent"
+                            color: cardHover.containsMouse ? Theme.cardHover : Theme.cardBg
+                            border.color: cardHover.containsMouse ? Theme.border : "transparent"
                             border.width: 1
 
                             Behavior on color { ColorAnimation { duration: Theme.animFast } }
                             Behavior on border.color { ColorAnimation { duration: Theme.animFast } }
 
                             MouseArea {
-                                id: itemHover
+                                id: cardHover
                                 anchors.fill: parent
                                 hoverEnabled: true
-                                onClicked: NotificationService.activateNotification(delegateWrapper.modelData)
+                                cursorShape: delegateWrapper.isStack ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                onClicked: {
+                                    if (delegateWrapper.isStack)
+                                        NotificationService.toggleAppExpanded(delegateWrapper.modelData.appKey)
+                                    else if (delegateWrapper.isRegular)
+                                        NotificationService.activateNotification(delegateWrapper.modelData)
+                                }
                             }
 
                             Row {
-                                id: notifContent
+                                id: cardContent
                                 anchors.left: parent.left
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
@@ -250,7 +332,7 @@ PanelWindow {
                                 spacing: 10
 
                                 Rectangle {
-                                    id: panelIconBox
+                                    id: iconBox
                                     width: 54
                                     height: 54
                                     radius: 14
@@ -258,20 +340,21 @@ PanelWindow {
                                     anchors.verticalCenter: parent.verticalCenter
 
                                     Image {
-                                        id: panelIconImg
+                                        id: iconImg
                                         anchors.centerIn: parent
                                         width: 34
                                         height: 34
                                         sourceSize.width: 34
                                         sourceSize.height: 34
                                         source: {
-                                            var icon = delegateWrapper.modelData.appIcon || ""
+                                            var d = delegateWrapper.modelData
+                                            var icon = d.appIcon || ""
                                             if (icon.length > 0) return Quickshell.iconPath(icon)
-                                            var img = delegateWrapper.modelData.image || ""
+                                            var img = d.image || ""
                                             if (img.length > 0) return img
-                                            var de = delegateWrapper.modelData.desktopEntry || ""
+                                            var de = d.desktopEntry || ""
                                             if (de.length > 0) return Quickshell.iconPath(de)
-                                            var name = (delegateWrapper.modelData.appName || "").toLowerCase()
+                                            var name = (d.appName || "").toLowerCase()
                                             if (name.length > 0) return Quickshell.iconPath(name)
                                             return ""
                                         }
@@ -280,19 +363,43 @@ PanelWindow {
 
                                     Text {
                                         anchors.centerIn: parent
-                                        visible: !panelIconImg.visible
+                                        visible: !iconImg.visible
                                         text: "󰂜"
                                         font.family: Theme.fontFamily
                                         font.pixelSize: 24
                                         color: Theme.dimText
                                     }
 
-                                    // X overlay — fades in on card hover
+                                    // Count badge (stack only, hidden when icon hovered)
                                     Rectangle {
+                                        visible: delegateWrapper.isStack && !iconHover.containsMouse
+                                        width: 22
+                                        height: 22
+                                        radius: 11
+                                        color: Theme.blue
+                                        anchors.right: parent.right
+                                        anchors.top: parent.top
+                                        anchors.rightMargin: -6
+                                        anchors.topMargin: -6
+                                        z: 3
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: String(delegateWrapper.modelData.count || "")
+                                            font.family: Theme.fontFamily
+                                            font.pixelSize: Theme.fontSize - 4
+                                            font.bold: true
+                                            color: Theme.base
+                                        }
+                                    }
+
+                                    // X overlay — fades in on icon hover
+                                    Rectangle {
+                                        visible: delegateWrapper.isRegular || delegateWrapper.isStack
                                         anchors.fill: parent
                                         radius: parent.radius
                                         color: Theme.border
-                                        opacity: itemHover.containsMouse ? 0.85 : 0
+                                        opacity: iconHover.containsMouse ? 0.85 : 0
                                         z: 1
                                         Behavior on opacity { NumberAnimation { duration: Theme.animFast } }
 
@@ -305,21 +412,66 @@ PanelWindow {
                                         }
                                     }
 
-                                    // Clickable dismiss
+                                    // Dismiss click (icon area)
                                     MouseArea {
+                                        id: iconHover
+                                        visible: delegateWrapper.isRegular || delegateWrapper.isStack
                                         anchors.fill: parent
                                         z: 3
+                                        hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor
-                                        onClicked: NotificationService.dismissNotification(delegateWrapper.modelData)
+                                        onClicked: {
+                                            if (delegateWrapper.isStack)
+                                                NotificationService.dismissAppStack(delegateWrapper.modelData.appKey)
+                                            else
+                                                NotificationService.dismissNotification(delegateWrapper.modelData)
+                                        }
                                     }
                                 }
 
                                 Column {
-                                    width: parent.width - panelIconBox.width - parent.spacing
+                                    width: parent.width - iconBox.width - parent.spacing
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: 2
 
+                                    // Stack: app name + age
                                     Row {
+                                        visible: delegateWrapper.isStack
+                                        width: parent.width
+
+                                        Text {
+                                            text: delegateWrapper.modelData.appName || delegateWrapper.modelData.appKey || ""
+                                            font.family: Theme.fontFamily
+                                            font.pixelSize: Theme.fontSize
+                                            font.bold: true
+                                            color: Theme.text
+                                            elide: Text.ElideRight
+                                            width: parent.width - stackAgeLabel.width - 4
+                                        }
+
+                                        Text {
+                                            id: stackAgeLabel
+                                            text: NotificationService.formatAge(delegateWrapper.modelData.time)
+                                            font.family: Theme.fontFamily
+                                            font.pixelSize: Theme.fontSize - 3
+                                            color: Theme.dimText
+                                        }
+                                    }
+
+                                    // Stack: latest notification preview
+                                    Text {
+                                        visible: delegateWrapper.isStack && (delegateWrapper.modelData.summary || "") !== ""
+                                        text: delegateWrapper.modelData.summary || ""
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.fontSize - 2
+                                        color: Theme.subtext0
+                                        elide: Text.ElideRight
+                                        width: parent.width
+                                    }
+
+                                    // Regular: summary + age
+                                    Row {
+                                        visible: delegateWrapper.isRegular
                                         width: parent.width
 
                                         Text {
@@ -342,8 +494,9 @@ PanelWindow {
                                         }
                                     }
 
+                                    // Regular: body
                                     Text {
-                                        visible: (delegateWrapper.modelData.body || "") !== ""
+                                        visible: delegateWrapper.isRegular && (delegateWrapper.modelData.body || "") !== ""
                                         text: delegateWrapper.modelData.body || ""
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.fontSize - 2
