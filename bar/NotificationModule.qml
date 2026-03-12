@@ -5,7 +5,7 @@ Rectangle {
     id: root
 
     property bool hasUnread: NotificationService.unreadCount > 0
-    property bool hasNotifications: NotificationService.count > 0
+    property bool hasNotifications: NotificationStore.count > 0
     property bool isHovered: mouseArea.containsMouse
 
     implicitWidth: notifRow.implicitWidth + Theme.pillPaddingH * 2

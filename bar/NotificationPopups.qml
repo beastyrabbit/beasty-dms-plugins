@@ -196,7 +196,7 @@ PanelWindow {
                         onExited: countdownAnim.resume()
                         onClicked: {
                             NotificationService.activateNotification(popupWrapper.modelData)
-                            NotificationService.removePopupById(popup._notifId)
+                            NotificationService.dismissNotification(popupWrapper.modelData)
                         }
                     }
 
@@ -282,7 +282,7 @@ PanelWindow {
                                 z: 4
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: NotificationService.removePopupById(popup._notifId)
+                                onClicked: NotificationService.dismissNotification(popupWrapper.modelData)
 
                                 Rectangle {
                                     anchors.fill: parent
