@@ -7,17 +7,17 @@ Singleton {
     id: root
 
     // Catppuccin Mocha palette
-    readonly property color base: "#1e1e2e"
+    readonly property color base: "#35353e"
     readonly property color text: "#cdd6f4"
     readonly property color subtext0: "#a6adc8"
-    readonly property color surface0: "#555869"
-    readonly property color crust: "#11111b"
+    readonly property color surface0: "#65687a"
+    readonly property color crust: "#222228"
 
     // Neutral dark greys (for panels, cards, surfaces)
-    readonly property color panelBg: "#1a1a1a"
-    readonly property color cardBg: "#252525"
-    readonly property color cardHover: "#2f2f2f"
-    readonly property color border: "#3a3a3a"
+    readonly property color panelBg: "#2b2b32"
+    readonly property color cardBg: "#3a3a44"
+    readonly property color cardHover: "#454550"
+    readonly property color border: "#505058"
     readonly property color dimText: "#888888"
 
     // Animation durations

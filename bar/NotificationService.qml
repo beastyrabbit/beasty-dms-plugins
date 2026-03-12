@@ -199,11 +199,18 @@ Singleton {
         }
     }
 
+    // Brief keep-alive after expand/collapse to survive hover blips
+    Timer {
+        id: expandKeepAlive
+        interval: 600
+    }
+
     // Delay before closing panel when mouse leaves
     Timer {
         id: closeDelayTimer
         interval: 400
         onTriggered: {
+            if (expandKeepAlive.running) return
             if (!root.panelHovered && !root.bellHovered)
                 root.panelVisible = false
         }
@@ -352,9 +359,8 @@ Singleton {
     }
 
     // Click notification: invoke default action if available
-    function activateNotification(notif) {
-        if (!notif) return
-        var nid = String(notif.id)
+    function activateNotification(notifId) {
+        var nid = String(notifId)
         for (var i = server.trackedNotifications.count - 1; i >= 0; i--) {
             var tracked = server.trackedNotifications.get(i)
             if (String(tracked.id) === nid) {
@@ -384,6 +390,7 @@ Singleton {
         }
         root._expandedApps = e
         root._expandedVersion++
+        expandKeepAlive.restart()
     }
 
     function dismissAll() {

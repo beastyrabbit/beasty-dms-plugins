@@ -61,7 +61,7 @@ PanelWindow {
         topLeftRadius: 0
         topRightRadius: 0
         bottomLeftRadius: 28
-        bottomRightRadius: 28
+        bottomRightRadius: 0
 
         opacity: NotificationService.panelVisible ? 1 : 0
 
@@ -323,7 +323,7 @@ PanelWindow {
                                     if (delegateWrapper.isStack)
                                         NotificationService.toggleAppExpanded(delegateWrapper.modelData.appKey)
                                     else if (delegateWrapper.isRegular)
-                                        NotificationService.activateNotification(delegateWrapper.modelData)
+                                        NotificationService.activateNotification(delegateWrapper.modelData.id)
                                 }
                             }
 

@@ -138,7 +138,6 @@ PanelWindow {
                 property string notifAppName: ""
                 property string notifImage: ""
                 property string notifDesktopEntry: ""
-                property var notifRef: null
 
                 Component.onCompleted: {
                     var d = popupWrapper.modelData
@@ -150,7 +149,6 @@ PanelWindow {
                     notifAppName = d.appName || ""
                     notifImage = d.image || ""
                     notifDesktopEntry = d.desktopEntry || ""
-                    notifRef = d
 
                     var remaining = NotificationService.getRemainingMs(notifId)
                     if (remaining <= 0) {
@@ -217,10 +215,8 @@ PanelWindow {
 
                     TapHandler {
                         onTapped: {
-                            var ref = popupWrapper.notifRef
-                            var nid = popupWrapper.notifId
-                            NotificationService.activateNotification(ref)
-                            NotificationService.dismissPopupById(nid)
+                            NotificationService.activateNotification(popupWrapper.notifId)
+                            NotificationService.dismissPopupById(popupWrapper.notifId)
                         }
                     }
 
@@ -278,7 +274,7 @@ PanelWindow {
                                     var cy = height / 2
                                     var r = Math.max(width, height)
 
-                                    ctx.fillStyle = "#2a2a2a"
+                                    ctx.fillStyle = "#3e3e48"
                                     ctx.beginPath()
                                     ctx.moveTo(cx, cy)
                                     ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + 2 * Math.PI * progress, false)
