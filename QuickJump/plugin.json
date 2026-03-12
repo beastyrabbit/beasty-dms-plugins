@@ -1,0 +1,12 @@
+{
+    "id": "quickJump",
+    "name": "QuickJump",
+    "description": "Quick-access buttons for running applications",
+    "version": "1.0.0",
+    "author": "beasty",
+    "type": "widget",
+    "capabilities": ["dankbar-widget"],
+    "component": "./QuickJump.qml",
+    "icon": "rocket_launch",
+    "permissions": []
+}
