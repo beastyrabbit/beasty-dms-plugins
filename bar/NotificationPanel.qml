@@ -196,12 +196,17 @@ PanelWindow {
                     property bool isStack: !!modelData._isStack
                     property bool isGroupHeader: !!modelData._isGroupHeader
                     property bool isRegular: !isStack && !isGroupHeader
+                    property string appKey: (modelData.desktopEntry || modelData.appName || "")
 
                     width: notifList.width
                     height: delegateContent.implicitHeight
                     clip: true
 
-                    ListView.onRemove: removeAnim.start()
+                    ListView.onRemove: {
+                        if (!delegateWrapper.isRegular) return
+                        if (NotificationService._collapsingApp !== delegateWrapper.appKey)
+                            removeAnim.start()
+                    }
 
                     SequentialAnimation {
                         id: removeAnim

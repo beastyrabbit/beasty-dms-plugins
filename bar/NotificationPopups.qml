@@ -128,6 +128,42 @@ PanelWindow {
                 required property var modelData
                 required property int index
 
+                // Cache all data from modelData at creation — modelData becomes
+                // null when removed from the list, but the delegate stays alive
+                // during the fly-out animation (delayRemove).
+                property string notifId: ""
+                property string notifSummary: ""
+                property string notifBody: ""
+                property string notifAppIcon: ""
+                property string notifAppName: ""
+                property string notifImage: ""
+                property string notifDesktopEntry: ""
+                property var notifRef: null
+
+                Component.onCompleted: {
+                    var d = popupWrapper.modelData
+                    if (!d) return
+                    notifId = String(d.id)
+                    notifSummary = d.summary || ""
+                    notifBody = d.body || ""
+                    notifAppIcon = d.appIcon || ""
+                    notifAppName = d.appName || ""
+                    notifImage = d.image || ""
+                    notifDesktopEntry = d.desktopEntry || ""
+                    notifRef = d
+
+                    var remaining = NotificationService.getRemainingMs(notifId)
+                    if (remaining <= 0) {
+                        NotificationService.removePopupById(notifId)
+                        return
+                    }
+                    popup.timerProgress = remaining / 10000
+                    countdownAnim.from = remaining / 10000
+                    countdownAnim.duration = remaining
+                    countdownAnim.start()
+                    popup.x = 0
+                }
+
                 width: popupList.width
                 height: popup.height
                 clip: true
@@ -167,12 +203,11 @@ PanelWindow {
                     border.width: 1
 
                     property real timerProgress: 1.0
-                    property var _notifId
-                    property bool isHovered: hoverHandler.hovered || String(popup._notifId) === NotificationService.hoveredPopupId
+                    property bool isHovered: hoverHandler.hovered || popupWrapper.notifId === NotificationService.hoveredPopupId
 
                     onIsHoveredChanged: {
                         if (isHovered) {
-                            NotificationService.hoveredPopupId = String(popup._notifId)
+                            NotificationService.hoveredPopupId = popupWrapper.notifId
                         }
                     }
 
@@ -182,28 +217,14 @@ PanelWindow {
 
                     TapHandler {
                         onTapped: {
-                            NotificationService.activateNotification(popupWrapper.modelData)
-                            NotificationService.dismissNotification(popupWrapper.modelData)
+                            var ref = popupWrapper.notifRef
+                            var nid = popupWrapper.notifId
+                            NotificationService.activateNotification(ref)
+                            NotificationService.dismissPopupById(nid)
                         }
                     }
 
-                    // Start off-screen right
                     x: parent.width
-
-                    Component.onCompleted: {
-                        popup._notifId = popupWrapper.modelData.id
-                        var remaining = NotificationService.getRemainingMs(popup._notifId)
-                        if (remaining <= 0) {
-                            NotificationService.removePopupById(popup._notifId)
-                            return
-                        }
-                        popup.timerProgress = remaining / 10000
-                        countdownAnim.from = remaining / 10000
-                        countdownAnim.duration = remaining
-                        countdownAnim.start()
-                        // Behavior on x animates this slide-in
-                        x = 0
-                    }
 
                     Behavior on x {
                         id: xBehavior
@@ -213,14 +234,13 @@ PanelWindow {
                     Behavior on color { ColorAnimation { duration: Theme.animFast } }
                     Behavior on border.color { ColorAnimation { duration: Theme.animFast } }
 
-                    // Countdown — drives visual ring and auto-dismiss
                     NumberAnimation {
                         id: countdownAnim
                         target: popup
                         property: "timerProgress"
                         to: 0.0
                         running: false
-                        onFinished: NotificationService.removePopupById(popup._notifId)
+                        onFinished: NotificationService.removePopupById(popupWrapper.notifId)
                     }
 
                     Row {
@@ -276,13 +296,13 @@ PanelWindow {
                                 sourceSize.width: 34
                                 sourceSize.height: 34
                                 source: {
-                                    var icon = popupWrapper.modelData.appIcon || ""
+                                    var icon = popupWrapper.notifAppIcon
                                     if (icon.length > 0) return Quickshell.iconPath(icon)
-                                    var img = popupWrapper.modelData.image || ""
+                                    var img = popupWrapper.notifImage
                                     if (img.length > 0) return img
-                                    var de = popupWrapper.modelData.desktopEntry || ""
+                                    var de = popupWrapper.notifDesktopEntry
                                     if (de.length > 0) return Quickshell.iconPath(de)
-                                    var name = (popupWrapper.modelData.appName || "").toLowerCase()
+                                    var name = popupWrapper.notifAppName.toLowerCase()
                                     if (name.length > 0) return Quickshell.iconPath(name)
                                     return ""
                                 }
@@ -293,7 +313,7 @@ PanelWindow {
                                 anchors.centerIn: parent
                                 z: 2
                                 visible: !appIconImg.visible
-                                text: "󰂜"
+                                text: "\u{F0B1C}"
                                 font.family: Theme.fontFamily
                                 font.pixelSize: 24
                                 color: Theme.dimText
@@ -305,7 +325,7 @@ PanelWindow {
                                 z: 4
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: NotificationService.dismissNotification(popupWrapper.modelData)
+                                onClicked: NotificationService.dismissPopupById(popupWrapper.notifId)
 
                                 Rectangle {
                                     anchors.fill: parent
@@ -319,7 +339,7 @@ PanelWindow {
 
                                     Text {
                                         anchors.centerIn: parent
-                                        text: "󰅖"
+                                        text: "\u{F0156}"
                                         font.family: Theme.fontFamily
                                         font.pixelSize: 20
                                         color: Theme.red
@@ -334,8 +354,8 @@ PanelWindow {
                             spacing: 2
 
                             Text {
-                                visible: (popupWrapper.modelData.summary || "") !== ""
-                                text: popupWrapper.modelData.summary || ""
+                                visible: popupWrapper.notifSummary !== ""
+                                text: popupWrapper.notifSummary
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.fontSize
                                 font.bold: true
@@ -345,8 +365,8 @@ PanelWindow {
                             }
 
                             Text {
-                                visible: (popupWrapper.modelData.body || "") !== ""
-                                text: popupWrapper.modelData.body || ""
+                                visible: popupWrapper.notifBody !== ""
+                                text: popupWrapper.notifBody
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.fontSize - 2
                                 color: Theme.subtext0

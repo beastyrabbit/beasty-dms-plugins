@@ -12,13 +12,13 @@ Singleton {
     property bool bellHovered: false
     property var popupNotifications: []
     property var _queue: []
-    property var _unreadIds: ({})
-    property int unreadCount: 0
-
     property bool stackByApp: true
     property var _expandedApps: ({})
+    property int _expandedVersion: 0
+    property string _collapsingApp: ""
 
     property var displayNotifications: {
+        void root._expandedVersion  // force re-eval on expand/collapse
         var notifs = NotificationStore.notifications
         var stacked = root.stackByApp
         var expanded = root._expandedApps
@@ -148,14 +148,9 @@ Singleton {
 
             // During startup, server re-sends all tracked notifications (keepOnReload).
             // The store already has what it needs from the persisted file.
-            // Only mark unread for notifications that still exist in the store.
             if (!root._ready) {
-                if (NotificationStore.getTime(notification.id) > 0)
-                    root._markUnread(notification.id)
                 return
             }
-
-            root._markUnread(notification.id)
 
             if (root.popupNotifications.length < root.maxVisible) {
                 var popups = root.popupNotifications.slice()
@@ -232,31 +227,6 @@ Singleton {
         }
     }
 
-    function _markUnread(notifId) {
-        var ids = root._unreadIds
-        ids[notifId] = true
-        root._unreadIds = ids
-        root._recountUnread()
-    }
-
-    function isUnread(notifId) {
-        return !!root._unreadIds[notifId]
-    }
-
-    function markRead(notifId) {
-        var ids = root._unreadIds
-        delete ids[notifId]
-        root._unreadIds = ids
-        root._recountUnread()
-    }
-
-    function _recountUnread() {
-        var n = 0
-        var ids = root._unreadIds
-        for (var k in ids) { if (ids[k]) n++ }
-        root.unreadCount = n
-    }
-
     function getRemainingMs(notifId) {
         var t = NotificationStore.getTime(notifId)
         if (!t) return 10000
@@ -299,12 +269,9 @@ Singleton {
 
     // User explicitly dismissed — remove from everything
     function dismissNotification(notif) {
+        if (!notif) return
         var nid = String(notif.id)
         root.removePopupById(nid)
-        var ids = root._unreadIds
-        delete ids[nid]
-        root._unreadIds = ids
-        root._recountUnread()
         NotificationStore.remove(nid)
         // Dismiss from server if it's a live notification
         if (typeof notif.dismiss === "function") {
@@ -320,6 +287,19 @@ Singleton {
         }
     }
 
+    // Dismiss by ID only — no object reference needed (safe during delayRemove)
+    function dismissPopupById(notifId) {
+        var nid = String(notifId)
+        root.removePopupById(nid)
+        NotificationStore.remove(nid)
+        for (var i = server.trackedNotifications.count - 1; i >= 0; i--) {
+            if (String(server.trackedNotifications.get(i).id) === nid) {
+                server.trackedNotifications.get(i).dismiss()
+                break
+            }
+        }
+    }
+
     function dismissAppStack(appKey) {
         var notifs = NotificationStore.notifications
         for (var i = notifs.length - 1; i >= 0; i--) {
@@ -327,9 +307,6 @@ Singleton {
             var key = n.desktopEntry || n.appName || ""
             if (key === appKey) {
                 root.removePopupById(n.id)
-                var ids = root._unreadIds
-                delete ids[n.id]
-                root._unreadIds = ids
                 NotificationStore.remove(n.id)
                 // Dismiss from server
                 for (var j = server.trackedNotifications.count - 1; j >= 0; j--) {
@@ -340,7 +317,6 @@ Singleton {
                 }
             }
         }
-        root._recountUnread()
     }
 
     function formatAge(timestamp) {
@@ -375,23 +351,21 @@ Singleton {
         return "Older"
     }
 
-    // Click notification: invoke default action or focus sending app
+    // Click notification: invoke default action if available
     function activateNotification(notif) {
-        // Try default action first
-        var actions = notif.actions
-        if (actions) {
-            for (var i = 0; i < actions.length; i++) {
-                if (actions[i].identifier === "default") {
-                    actions[i].invoke()
-                    return
+        if (!notif) return
+        var nid = String(notif.id)
+        for (var i = server.trackedNotifications.count - 1; i >= 0; i--) {
+            var tracked = server.trackedNotifications.get(i)
+            if (String(tracked.id) === nid) {
+                for (var j = 0; j < tracked.actions.length; j++) {
+                    if (tracked.actions[j].identifier === "default") {
+                        tracked.actions[j].invoke()
+                        return
+                    }
                 }
+                break
             }
-        }
-        // Fallback: focus app window via niri
-        var app = notif.desktopEntry || notif.appName || ""
-        if (app.length > 0) {
-            var appLower = app.toLowerCase()
-            Quickshell.execDetached(["niri", "msg", "action", "focus-window", "--app-id", appLower])
         }
     }
 
@@ -403,18 +377,18 @@ Singleton {
     function toggleAppExpanded(appKey) {
         var e = root._expandedApps
         if (e[appKey]) {
+            root._collapsingApp = appKey
             delete e[appKey]
         } else {
             e[appKey] = true
         }
         root._expandedApps = e
+        root._expandedVersion++
     }
 
     function dismissAll() {
         root.popupNotifications = []
         root._queue = []
-        root._unreadIds = ({})
-        root.unreadCount = 0
         for (var i = server.trackedNotifications.count - 1; i >= 0; i--) {
             server.trackedNotifications.get(i).dismiss()
         }

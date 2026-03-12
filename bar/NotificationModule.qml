@@ -4,7 +4,6 @@ import Quickshell
 Rectangle {
     id: root
 
-    property bool hasUnread: NotificationService.unreadCount > 0
     property bool hasNotifications: NotificationStore.count > 0
     property bool isHovered: mouseArea.containsMouse
 
@@ -20,16 +19,16 @@ Rectangle {
 
         Text {
             id: notifLabel
-            color: root.hasUnread ? Theme.blue : (root.hasNotifications ? Theme.red : (root.isHovered ? Theme.text : Theme.subtext0))
+            color: root.hasNotifications ? Theme.blue : (root.isHovered ? Theme.text : Theme.subtext0)
             font.family: Theme.fontFamily
             font.pixelSize: Theme.fontSize
             font.bold: true
-            text: root.hasUnread ? "󰂚" : (root.hasNotifications ? "󰂚" : "󰂜")
+            text: root.hasNotifications ? "󰂚" : "󰂜"
         }
 
         Text {
-            visible: root.hasUnread
-            text: NotificationService.unreadCount.toString()
+            visible: root.hasNotifications
+            text: NotificationStore.count.toString()
             font.family: Theme.fontFamily
             font.pixelSize: Theme.fontSize - 2
             font.bold: true
