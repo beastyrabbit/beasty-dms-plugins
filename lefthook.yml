@@ -1,0 +1,38 @@
+pre-commit:
+  commands:
+    gitleaks:
+      run: gitleaks protect --staged --no-banner
+      fail_text: "Secrets detected in staged changes"
+
+    qml-syntax:
+      glob: "*.qml"
+      run: |
+        for f in {staged_files}; do
+          if [ -f "$f" ]; then
+            # Basic QML validation: check for balanced braces
+            open=$(grep -o '{' "$f" | wc -l)
+            close=$(grep -o '}' "$f" | wc -l)
+            if [ "$open" -ne "$close" ]; then
+              echo "Unbalanced braces in $f (open: $open, close: $close)"
+              exit 1
+            fi
+          fi
+        done
+      fail_text: "QML syntax issues found"
+
+    plugin-json:
+      glob: "**/plugin.json"
+      run: |
+        for f in {staged_files}; do
+          if [ -f "$f" ]; then
+            python3 -m json.tool "$f" > /dev/null 2>&1 || { echo "Invalid JSON: $f"; exit 1; }
+            # Check required plugin fields
+            for field in id name component type; do
+              if ! grep -q "\"$field\"" "$f"; then
+                echo "Missing required field '$field' in $f"
+                exit 1
+              fi
+            done
+          fi
+        done
+      fail_text: "Plugin manifest validation failed"
