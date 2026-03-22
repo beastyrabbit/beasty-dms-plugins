@@ -1,0 +1,12 @@
+{
+    "id": "catppuccinWorkspaces",
+    "name": "Catppuccin Workspaces",
+    "description": "Rainbow Catppuccin-themed workspace switcher for niri with dynamic workspace support",
+    "version": "1.0.0",
+    "author": "beasty",
+    "type": "widget",
+    "capabilities": ["dankbar-widget"],
+    "component": "./CatppuccinWorkspaces.qml",
+    "icon": "grid_view",
+    "permissions": []
+}

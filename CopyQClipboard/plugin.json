@@ -1,0 +1,12 @@
+{
+    "id": "copyqClipboard",
+    "name": "CopyQ Clipboard",
+    "description": "Clipboard history manager powered by CopyQ with search, pinning, and keyboard navigation",
+    "version": "1.0.0",
+    "author": "beasty",
+    "type": "widget",
+    "capabilities": ["dankbar-widget"],
+    "component": "./CopyQClipboard.qml",
+    "icon": "content_paste",
+    "permissions": []
+}
