@@ -1,0 +1,12 @@
+{
+    "id": "hyprlandWorkspaces",
+    "name": "Hyprland Workspaces",
+    "description": "Rainbow workspace switcher for Hyprland with special workspaces and scratchpads",
+    "version": "1.0.0",
+    "author": "beasty",
+    "type": "widget",
+    "capabilities": ["dankbar-widget"],
+    "component": "./HyprlandWorkspaces.qml",
+    "icon": "grid_view",
+    "permissions": []
+}
