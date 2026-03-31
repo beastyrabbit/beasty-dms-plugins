@@ -10,17 +10,17 @@ Item {
 
     // --- Configuration: Special Workspaces ---
     readonly property var specialWorkspaces: [
+        { name: "security",  icon: "\uf023", label: "1Password" },
         { name: "sozial",    icon: "\uf075", label: "Sozial" },
         { name: "discord",   icon: "\uf392", label: "Discord" },
-        { name: "1password", icon: "\uf023", label: "1Password" },
         { name: "tools",     icon: "\uf0ad", label: "Tools" }
     ]
 
     // --- Configuration: Scratchpads ---
     readonly property var scratchpads: [
         { name: "scratch1", icon: "\uf120", label: "Scratch 1" },
-        { name: "scratch2", icon: "\uf120", label: "Scratch 2" },
-        { name: "scratch3", icon: "\uf120", label: "Scratch 3" }
+        { name: "scratch2", icon: "\uf121", label: "Scratch 2" },
+        { name: "scratch3", icon: "\uf135", label: "Scratch 3" }
     ]
 
     // --- Exposed State ---
