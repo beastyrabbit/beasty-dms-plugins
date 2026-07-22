@@ -5,6 +5,7 @@ Personal [DMS](https://github.com/dangass/dms) plugins for niri.
 ## Plugins
 
 - **QuickJump** — bar buttons to focus running apps (Discord, WhatsApp, Fastmail, Steam, 1Password)
+- **Cowork** — launcher picker for opening `~/cowork` with Codex, Claude, or Pi
 - **CatppuccinWorkspaces** — Catppuccin Mocha workspace indicator
 - **CopyQClipboard** — clipboard history via CopyQ (disabled)
 - **Quick AI** — type `?` for quick questions, translation, and input or clipboard summaries
@@ -27,6 +28,22 @@ Selecting Summarize Clipboard sends the current plain-text clipboard contents to
 
 The DMS built-in Settings Search normally owns `?`; move its trigger to `ds` before using Quick AI.
 
+## Local deployment
+
+The tracked [`plugins.json`](plugins.json) inventory defines the plugins deployed from this repository. Deployments are copied into a stable directory under `~/.local/share/dms-plugins`; DMS never points directly at a disposable development worktree.
+
+Use the guarded deployment command instead of manually changing plugin symlinks or running `dms restart`:
+
+```bash
+python3 scripts/deploy_plugins.py
+```
+
+It validates every inventory entry and referenced component, rejects untracked plugin files and disposable worktrees, updates all plugin links atomically, restarts DMS, and verifies that every expected plugin ID is discovered. Diagnose the repository and live deployment without changing anything using:
+
+```bash
+python3 scripts/plugin_doctor.py
+```
+
 Offline verification (no model calls):
 
 ```bash
@@ -34,6 +51,7 @@ python3 -m unittest discover -s tests -v
 QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/tst_quick_ai_launcher.qml
 qmllint -I /usr/share/quickshell/dms QuickAI/*.qml
 python3 scripts/validate_plugin.py QuickAI/plugin.json
+python3 scripts/plugin_doctor.py --repo-only
 ```
 
 ## License

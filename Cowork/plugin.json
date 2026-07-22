@@ -1,0 +1,25 @@
+{
+  "id": "cowork",
+  "name": "Cowork",
+  "description": "Choose an AI coding agent and open it in the cowork workspace",
+  "version": "1.0.0",
+  "author": "beasty",
+  "type": "launcher",
+  "capabilities": [
+    "command-execution"
+  ],
+  "component": "./CoworkLauncher.qml",
+  "trigger": "cow",
+  "icon": "terminal",
+  "requires_dms": ">=1.4.6",
+  "requires": [
+    "kitty",
+    "zsh",
+    "codex",
+    "claude",
+    "pi"
+  ],
+  "permissions": [
+    "process"
+  ]
+}

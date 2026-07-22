@@ -1,0 +1,24 @@
+{
+  "plugins": [
+    {
+      "directory": "CatppuccinWorkspaces",
+      "id": "catppuccinWorkspaces"
+    },
+    {
+      "directory": "Cowork",
+      "id": "cowork"
+    },
+    {
+      "directory": "HyprlandWorkspaces",
+      "id": "hyprlandWorkspaces"
+    },
+    {
+      "directory": "QuickAI",
+      "id": "quickAi"
+    },
+    {
+      "directory": "QuickJump",
+      "id": "quickJump"
+    }
+  ]
+}

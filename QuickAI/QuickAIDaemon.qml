@@ -141,7 +141,24 @@ PluginComponent {
         activeProcess.running = true;
     }
 
-    function processFinished(requestGeneration, exitCode, stdoutText) {
+    function processFailureMessage(stderrText) {
+        const details = (stderrText || "").toLowerCase();
+        if (details.includes("can't open file") && details.includes("quick_ai.py"))
+            return "Quick AI helper is missing. Redeploy the plugin.";
+
+        if (details.includes("no such file or directory"))
+            return "Quick AI could not start because a required file is missing.";
+
+        if (details.includes("permission denied"))
+            return "Quick AI could not start because a plugin file is not executable.";
+
+        if (details.includes("traceback"))
+            return "Quick AI helper failed internally. Check the DMS log.";
+
+        return "Quick AI stopped unexpectedly. Try again.";
+    }
+
+    function processFinished(requestGeneration, exitCode, stdoutText, stderrText) {
         activeProcess = null;
         if (pendingRequest) {
             Qt.callLater(startPendingRequest);
@@ -158,7 +175,7 @@ PluginComponent {
         }
         if (exitCode !== 0 || !payload) {
             status = "error";
-            errorMessage = "Quick AI stopped unexpectedly. Try again.";
+            errorMessage = processFailureMessage(stderrText);
             return ;
         }
         elapsedMs = payload.elapsedMs || 0;
@@ -243,7 +260,7 @@ PluginComponent {
             property int requestGeneration: 0
 
             onExited: (exitCode) => {
-                root.processFinished(requestGeneration, exitCode, stdoutCollector.text);
+                root.processFinished(requestGeneration, exitCode, stdoutCollector.text, stderrCollector.text);
                 destroy();
             }
 
@@ -252,6 +269,7 @@ PluginComponent {
             }
 
             stderr: StdioCollector {
+                id: stderrCollector
             }
 
         }

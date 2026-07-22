@@ -1,5 +1,9 @@
 pre-commit:
   commands:
+    plugin-integrity:
+      run: python3 scripts/plugin_doctor.py --repo-only
+      fail_text: "Local DMS plugin inventory is incomplete or untracked"
+
     gitleaks:
       run: gitleaks protect --staged --no-banner
       fail_text: "Secrets detected in staged changes"
@@ -24,7 +28,13 @@ pre-commit:
     python-quality:
       glob: "*.py"
       run: |
-        ruff check QuickAI/quick_ai.py scripts/validate_plugin.py tests/test_quick_ai.py
-        ruff format --check QuickAI/quick_ai.py scripts/validate_plugin.py tests/test_quick_ai.py
+        ruff check QuickAI scripts tests
+        ruff format --check QuickAI scripts tests
         python3 -m unittest discover -s tests -v
       fail_text: "Quick AI tests failed"
+
+pre-push:
+  commands:
+    plugin-integrity:
+      run: python3 scripts/plugin_doctor.py --head
+      fail_text: "Committed DMS plugin inventory is incomplete"
