@@ -1,0 +1,19 @@
+{
+  "id": "quickAi",
+  "name": "Quick AI",
+  "description": "Fast questions, English-German translation, and input or clipboard summaries powered by Codex",
+  "version": "1.0.0",
+  "author": "beasty",
+  "type": "composite",
+  "capabilities": ["launcher", "daemon", "quick-ai", "translation", "summarization", "clipboard"],
+  "components": {
+    "launcher": "./QuickAILauncher.qml",
+    "daemon": "./QuickAIDaemon.qml"
+  },
+  "trigger": "?",
+  "icon": "bolt",
+  "startupCheck": "./StartupCheck.qml",
+  "requires_dms": ">=1.5.0",
+  "dependencies": ["python3", "wl-paste"],
+  "permissions": ["process"]
+}

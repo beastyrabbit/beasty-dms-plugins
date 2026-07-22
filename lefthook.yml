@@ -4,35 +4,27 @@ pre-commit:
       run: gitleaks protect --staged --no-banner
       fail_text: "Secrets detected in staged changes"
 
-    qml-syntax:
+    qml-lint:
       glob: "*.qml"
       run: |
         for f in {staged_files}; do
           if [ -f "$f" ]; then
-            # Basic QML validation: check for balanced braces
-            open=$(grep -o '{' "$f" | wc -l)
-            close=$(grep -o '}' "$f" | wc -l)
-            if [ "$open" -ne "$close" ]; then
-              echo "Unbalanced braces in $f (open: $open, close: $close)"
-              exit 1
-            fi
+            qmlformat "$f" > /dev/null || exit 1
+            qmllint -I /usr/share/quickshell/dms "$f" || exit 1
           fi
         done
+        QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/tst_quick_ai_launcher.qml
       fail_text: "QML syntax issues found"
 
     plugin-json:
       glob: "**/plugin.json"
-      run: |
-        for f in {staged_files}; do
-          if [ -f "$f" ]; then
-            python3 -m json.tool "$f" > /dev/null 2>&1 || { echo "Invalid JSON: $f"; exit 1; }
-            # Check required plugin fields
-            for field in id name component type; do
-              if ! grep -q "\"$field\"" "$f"; then
-                echo "Missing required field '$field' in $f"
-                exit 1
-              fi
-            done
-          fi
-        done
+      run: python3 scripts/validate_plugin.py {staged_files}
       fail_text: "Plugin manifest validation failed"
+
+    python-quality:
+      glob: "*.py"
+      run: |
+        ruff check QuickAI/quick_ai.py scripts/validate_plugin.py tests/test_quick_ai.py
+        ruff format --check QuickAI/quick_ai.py scripts/validate_plugin.py tests/test_quick_ai.py
+        python3 -m unittest discover -s tests -v
+      fail_text: "Quick AI tests failed"
