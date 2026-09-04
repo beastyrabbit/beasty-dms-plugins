@@ -1,7 +1,7 @@
 {
     "id": "hyprlandWorkspaces",
     "name": "Hyprland Workspaces",
-    "description": "Rainbow workspace switcher for Hyprland with special workspaces and scratchpads",
+    "description": "Rainbow workspace switcher for Hyprland with named workspaces and scratchpads",
     "version": "1.0.0",
     "author": "beasty",
     "type": "widget",
