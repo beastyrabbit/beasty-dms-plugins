@@ -8,11 +8,11 @@ Item {
     width: 0
     height: 0
 
-    // --- Configuration: Special Workspaces ---
-    readonly property var specialWorkspaces: [
-        { name: "security",  icon: "\uf023", label: "1Password" },
-        { name: "sozial",    icon: "\uf075", label: "Sozial" },
-        { name: "discord",   icon: "\uf392", label: "Discord" },
+    // --- Configuration: Named Workspaces ---
+    readonly property var namedWorkspaces: [
+        { name: "security",  icon: "\uf084", label: "Passwords" },
+        { name: "sozial",    icon: "\uf232", label: "WhatsApp" },
+        { name: "discord",   icon: "\uf1ff", label: "Discord" },
         { name: "tools",     icon: "\uf0ad", label: "Tools" }
     ]
 
@@ -32,6 +32,10 @@ Item {
         Hyprland.dispatch("workspace " + num)
     }
 
+    function switchNamedWorkspace(name) {
+        Hyprland.dispatch("workspace name:" + name)
+    }
+
     function toggleSpecial(name) {
         Hyprland.dispatch("togglespecialworkspace " + name)
     }
@@ -41,6 +45,17 @@ Item {
         return Hyprland.focusedWorkspace !== null
             && Hyprland.focusedWorkspace.id === wsId
             && activeSpecialName === ""
+    }
+
+    function isNamedFocused(name) {
+        return Hyprland.focusedWorkspace !== null
+            && Hyprland.focusedWorkspace.name === name
+            && activeSpecialName === ""
+    }
+
+    function namedHasWindows(name) {
+        var ws = _findWorkspaceByName(name)
+        return ws ? ws.lastIpcObject.windows > 0 : false
     }
 
     function isSpecialFocused(shortName) {
