@@ -1,5 +1,6 @@
 # beasty-dms-plugins
 
+
 Personal [DMS](https://github.com/dangass/dms) plugins for niri.
 
 ## Plugins
