@@ -92,21 +92,21 @@ PluginComponent {
                 radius: 1
             }
 
-            // --- Special Workspaces ---
+            // --- Named Workspaces ---
             Repeater {
-                model: hyprState.specialWorkspaces
+                model: hyprState.namedWorkspaces
 
                 delegate: Rectangle {
-                    id: hSpecialButton
+                    id: hNamedButton
 
                     required property var modelData
                     required property int index
 
-                    property bool isFocused: hyprState.isSpecialFocused(modelData.name)
-                    property bool hasWindows: hyprState.specialHasWindows(modelData.name)
-                    property bool isHovered: hSpecialMouse.containsMouse
+                    property bool isFocused: hyprState.isNamedFocused(modelData.name)
+                    property bool hasWindows: hyprState.namedHasWindows(modelData.name)
+                    property bool isHovered: hNamedMouse.containsMouse
 
-                    width: hSpecialIcon.implicitWidth + 10
+                    width: hNamedIcon.implicitWidth + 10
                     height: root.widgetThickness - 6
                     anchors.verticalCenter: parent.verticalCenter
                     radius: (isHovered || isFocused) ? 10 : 0
@@ -118,27 +118,27 @@ PluginComponent {
                     Behavior on radius { NumberAnimation { duration: 150 } }
 
                     Text {
-                        id: hSpecialIcon
+                        id: hNamedIcon
                         anchors.centerIn: parent
-                        text: hSpecialButton.modelData.icon
+                        text: hNamedButton.modelData.icon
                         font.family: "OpenDyslexic Nerd Font"
                         font.pixelSize: 16
                         font.bold: true
-                        opacity: hSpecialButton.hasWindows || hSpecialButton.isFocused ? 1.0 : 0.35
-                        color: hSpecialButton.isFocused ? root.catCrust
-                             : hSpecialButton.isHovered ? root.catText
-                             : hSpecialButton.hasWindows ? root.catSubtext0
+                        opacity: hNamedButton.hasWindows || hNamedButton.isFocused ? 1.0 : 0.35
+                        color: hNamedButton.isFocused ? root.catCrust
+                             : hNamedButton.isHovered ? root.catText
+                             : hNamedButton.hasWindows ? root.catSubtext0
                              : root.catSurface0
 
                         Behavior on opacity { NumberAnimation { duration: 150 } }
                     }
 
                     MouseArea {
-                        id: hSpecialMouse
+                        id: hNamedMouse
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: hyprState.toggleSpecial(hSpecialButton.modelData.name)
+                        onClicked: hyprState.switchNamedWorkspace(hNamedButton.modelData.name)
                     }
                 }
             }
@@ -270,22 +270,22 @@ PluginComponent {
                 radius: 1
             }
 
-            // --- Special Workspaces ---
+            // --- Named Workspaces ---
             Repeater {
-                model: hyprState.specialWorkspaces
+                model: hyprState.namedWorkspaces
 
                 delegate: Rectangle {
-                    id: vSpecialButton
+                    id: vNamedButton
 
                     required property var modelData
                     required property int index
 
-                    property bool isFocused: hyprState.isSpecialFocused(modelData.name)
-                    property bool hasWindows: hyprState.specialHasWindows(modelData.name)
-                    property bool isHovered: vSpecialMouse.containsMouse
+                    property bool isFocused: hyprState.isNamedFocused(modelData.name)
+                    property bool hasWindows: hyprState.namedHasWindows(modelData.name)
+                    property bool isHovered: vNamedMouse.containsMouse
 
                     width: root.widgetThickness - 6
-                    height: vSpecialIcon.implicitHeight + 10
+                    height: vNamedIcon.implicitHeight + 10
                     anchors.horizontalCenter: parent.horizontalCenter
                     radius: (isHovered || isFocused) ? 10 : 0
                     color: isFocused ? root.catMauve
@@ -296,27 +296,27 @@ PluginComponent {
                     Behavior on radius { NumberAnimation { duration: 150 } }
 
                     Text {
-                        id: vSpecialIcon
+                        id: vNamedIcon
                         anchors.centerIn: parent
-                        text: vSpecialButton.modelData.icon
+                        text: vNamedButton.modelData.icon
                         font.family: "OpenDyslexic Nerd Font"
                         font.pixelSize: 16
                         font.bold: true
-                        opacity: vSpecialButton.hasWindows || vSpecialButton.isFocused ? 1.0 : 0.35
-                        color: vSpecialButton.isFocused ? root.catCrust
-                             : vSpecialButton.isHovered ? root.catText
-                             : vSpecialButton.hasWindows ? root.catSubtext0
+                        opacity: vNamedButton.hasWindows || vNamedButton.isFocused ? 1.0 : 0.35
+                        color: vNamedButton.isFocused ? root.catCrust
+                             : vNamedButton.isHovered ? root.catText
+                             : vNamedButton.hasWindows ? root.catSubtext0
                              : root.catSurface0
 
                         Behavior on opacity { NumberAnimation { duration: 150 } }
                     }
 
                     MouseArea {
-                        id: vSpecialMouse
+                        id: vNamedMouse
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: hyprState.toggleSpecial(vSpecialButton.modelData.name)
+                        onClicked: hyprState.switchNamedWorkspace(vNamedButton.modelData.name)
                     }
                 }
             }
