@@ -60,8 +60,9 @@ PluginComponent {
         Quickshell.execDetached(["systemd-run", "--user", "--scope", "--quiet", "--collect", "python3", helperPath].concat(args));
     }
 
-    function watch(login, muted) {
-        const args = ["--watch", login, "--quality", quality, "--volume", muted ? "0" : volume];
+    function watch(channel, muted) {
+        const title = channel.title ? channel.name + " - " + channel.title : channel.name;
+        const args = ["--watch", channel.login, "--quality", quality, "--volume", muted ? "0" : volume, "--media-title", title];
         if (!chatOverlay)
             args.push("--no-chat-overlay");
         launch(args);
@@ -230,11 +231,11 @@ PluginComponent {
                         DIconButton {
                             iconName: "play_arrow"
                             tooltipText: "Watch in mpv (right-click: muted)"
-                            onClicked: root.watch(row.modelData.login, false)
+                            onClicked: root.watch(row.modelData, false)
 
                             TapHandler {
                                 acceptedButtons: Qt.RightButton
-                                onTapped: root.watch(row.modelData.login, true)
+                                onTapped: root.watch(row.modelData, true)
                             }
                         }
 

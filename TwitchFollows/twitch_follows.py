@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -199,31 +200,51 @@ def open_chat(login: str) -> int:
 
 
 def watch(
-    login: str, quality: str, chat_overlay: bool = True, volume: int = DEFAULT_VOLUME
+    login: str,
+    quality: str,
+    chat_overlay: bool = True,
+    volume: int = DEFAULT_VOLUME,
+    media_title: str = "",
 ) -> int:
     streamlink = shutil.which("streamlink")
-    if not streamlink:
+    mpv = shutil.which("mpv")
+    if not streamlink or not mpv:
+        missing = "streamlink" if not streamlink else "mpv"
         notify(
-            "streamlink is not installed", "Install it with: sudo pacman -S streamlink"
+            f"{missing} is not installed", f"Install it with: sudo pacman -S {missing}"
         )
         return 1
     with file_lock(f"twitch-follows-watch-{login}.lock", blocking=False) as acquired:
         if not acquired:
             return 0
-        return play(streamlink, login, quality, chat_overlay, volume)
+        return play(
+            streamlink, mpv, login, quality, chat_overlay, volume, media_title or login
+        )
 
 
 def play(
-    streamlink: str, login: str, quality: str, chat_overlay: bool, volume: int
+    streamlink: str,
+    mpv: str,
+    login: str,
+    quality: str,
+    chat_overlay: bool,
+    volume: int,
+    media_title: str,
 ) -> int:
-    # Open the window at once: during a pre-roll ad streamlink sends no data,
-    # and mpv would otherwise stay invisible until the ad is over.
-    player_args = ["--force-window=immediate", f"--volume={volume}"]
+    # mpv starts right away and streamlink pipes the stream into it, so the
+    # window (with chat and a loading message) appears while streamlink is
+    # still talking to Twitch or skipping a pre-roll ad.
+    player = [
+        mpv,
+        "--force-window=immediate",
+        f"--volume={volume}",
+        f"--force-media-title={media_title}",
+    ]
     overlay = None
     ipc_path = None
     if chat_overlay:
         ipc_path = runtime_path(f"twitch-follows-{login}-{os.getpid()}.sock")
-        player_args.append(f"--input-ipc-server={ipc_path}")
+        player.append(f"--input-ipc-server={ipc_path}")
         overlay = subprocess.Popen(
             [
                 sys.executable,
@@ -235,35 +256,52 @@ def play(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    command = [
-        streamlink,
-        "--player",
-        "mpv",
-        "--player-args",
-        " ".join(player_args),
-        "--title",
-        "{author} - {title}",
-        "--twitch-low-latency",
-        f"https://twitch.tv/{login}",
-        f"{quality},best",
-    ]
+    # streamlink's log goes to a file: a pipe nobody reads could fill up and
+    # stall a long stream.
+    log_path = runtime_path(f"twitch-follows-{login}.log")
     try:
-        result = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        with open(log_path, "w") as log:
+            source = subprocess.Popen(
+                [
+                    streamlink,
+                    "--stdout",
+                    "--twitch-low-latency",
+                    f"https://twitch.tv/{login}",
+                    f"{quality},best",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=log,
+            )
+            viewer = subprocess.Popen(
+                [*player, "-"],
+                stdin=source.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            assert source.stdout is not None
+            source.stdout.close()
+            # Whichever exits first decides: mpv closed by the user is normal,
+            # streamlink ending first means the stream failed or ended.
+            while viewer.poll() is None and source.poll() is None:
+                time.sleep(0.2)
+            stream_failed = viewer.poll() is None and source.returncode != 0
+            if viewer.poll() is None:
+                viewer.wait()
+            else:
+                source.terminate()
+            source.wait()
     finally:
         if overlay:
             overlay.terminate()
+            overlay.wait()
         if ipc_path:
             ipc_path.unlink(missing_ok=True)
-    if result.returncode != 0:
-        lines = (result.stderr or result.stdout).strip().splitlines()
+    if stream_failed:
+        lines = log_path.read_text(errors="replace").strip().splitlines()
         notify(f"Could not play {login}", lines[-1] if lines else "streamlink failed.")
-    return result.returncode
+        return source.returncode
+    return 0
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -284,6 +322,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_VOLUME,
         help="starting mpv volume (0-100) for --watch",
+    )
+    parser.add_argument(
+        "--media-title", default="", help="mpv window title for --watch"
     )
     parser.add_argument(
         "--no-chat-overlay",
@@ -310,7 +351,9 @@ def main(argv: list[str] | None = None) -> int:
         return open_chat(login.lower())
     quality = args.quality if QUALITY_PATTERN.match(args.quality) else "best"
     volume = min(max(args.volume, 0), 100)
-    return watch(login.lower(), quality, not args.no_chat_overlay, volume)
+    return watch(
+        login.lower(), quality, not args.no_chat_overlay, volume, args.media_title[:200]
+    )
 
 
 if __name__ == "__main__":

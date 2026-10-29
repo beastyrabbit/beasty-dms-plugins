@@ -3,8 +3,10 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 from contextlib import redirect_stdout
@@ -133,6 +135,7 @@ class LaunchTests(unittest.TestCase):
     def setUp(self) -> None:
         runtime = tempfile.TemporaryDirectory()
         self.addCleanup(runtime.cleanup)
+        self.runtime = runtime.name
         env = patch.dict(twitch_follows.os.environ, {"XDG_RUNTIME_DIR": runtime.name})
         env.start()
         self.addCleanup(env.stop)
@@ -143,56 +146,94 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(twitch_follows.main(["--watch", "a;rm -rf"]), 2)
         run.assert_not_called()
 
-    def test_watch_runs_streamlink_with_quality_fallback(self) -> None:
-        with (
-            patch.object(twitch_follows.shutil, "which", return_value="/usr/bin/x"),
-            patch.object(
-                twitch_follows.subprocess, "run", return_value=self.completed
-            ) as run,
-            patch.object(twitch_follows.subprocess, "Popen") as popen,
-        ):
-            self.assertEqual(
-                twitch_follows.main(["--watch", "Big", "--quality", "720p60"]), 0
+    def fake_tools(self, streamlink_body: str, mpv_body: str) -> Path:
+        bin_dir = Path(self.runtime) / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        for name, body in (("streamlink", streamlink_body), ("mpv", mpv_body)):
+            script = bin_dir / name
+            script.write_text(
+                f'#!/bin/sh\necho "$@" > "{bin_dir}/{name}.args"\n{body}\n'
             )
-        command = run.call_args.args[0]
-        self.assertIn("https://twitch.tv/big", command)
-        self.assertIn("--twitch-low-latency", command)
-        self.assertEqual(command[-1], "720p60,best")
-        player_args = command[command.index("--player-args") + 1].split()
-        self.assertIn("--force-window=immediate", player_args)
-        self.assertIn("--volume=25", player_args)
-        ipc_path = player_args[2].removeprefix("--input-ipc-server=")
-        overlay = popen.call_args.args[0]
-        self.assertTrue(overlay[1].endswith("chat_overlay.py"))
-        self.assertEqual(overlay[2:], ["big", ipc_path])
-        popen.return_value.terminate.assert_called_once()
-
-    def test_watch_without_chat_overlay(self) -> None:
-        with (
-            patch.object(twitch_follows.shutil, "which", return_value="/usr/bin/x"),
-            patch.object(
-                twitch_follows.subprocess, "run", return_value=self.completed
-            ) as run,
-            patch.object(twitch_follows.subprocess, "Popen") as popen,
-        ):
-            twitch_follows.main(
-                ["--watch", "big", "--no-chat-overlay", "--volume", "250"]
-            )
-        command = run.call_args.args[0]
-        self.assertEqual(
-            command[command.index("--player-args") + 1],
-            "--force-window=immediate --volume=100",
+            script.chmod(0o755)
+        which = patch.object(
+            twitch_follows.shutil, "which", side_effect=lambda name: str(bin_dir / name)
         )
-        popen.assert_not_called()
+        which.start()
+        self.addCleanup(which.stop)
+        return bin_dir
+
+    def test_watch_pipes_streamlink_into_mpv(self) -> None:
+        bin_dir = self.fake_tools("printf video", f'cat > "{self.runtime}/bin/seen"')
+        with patch.object(twitch_follows, "notify") as notify:
+            code = twitch_follows.main(
+                [
+                    "--watch",
+                    "Big",
+                    "--quality",
+                    "720p60",
+                    "--no-chat-overlay",
+                    "--media-title",
+                    "Big - hi",
+                ]
+            )
+        self.assertEqual(code, 0)
+        notify.assert_not_called()
+        self.assertEqual((bin_dir / "seen").read_text(), "video")
+        self.assertEqual(
+            (bin_dir / "streamlink.args").read_text().split(),
+            [
+                "--stdout",
+                "--twitch-low-latency",
+                "https://twitch.tv/big",
+                "720p60,best",
+            ],
+        )
+        mpv_args = (bin_dir / "mpv.args").read_text()
+        self.assertIn("--force-window=immediate --volume=25", mpv_args)
+        self.assertIn("--force-media-title=Big - hi -", mpv_args)
+
+    def test_watch_starts_chat_overlay_on_the_mpv_socket(self) -> None:
+        bin_dir = self.fake_tools("printf video", "cat > /dev/null")
+        with patch.object(
+            twitch_follows.subprocess, "Popen", wraps=subprocess.Popen
+        ) as popen:
+            twitch_follows.main(["--watch", "big", "--volume", "250"])
+        overlay = popen.call_args_list[0].args[0]
+        self.assertTrue(overlay[1].endswith("chat_overlay.py"))
+        self.assertEqual(overlay[2], "big")
+        mpv_args = (bin_dir / "mpv.args").read_text()
+        self.assertIn("--volume=100", mpv_args)
+        self.assertIn(f"--input-ipc-server={overlay[3]}", mpv_args)
+
+    def test_failed_stream_notifies_with_streamlink_error(self) -> None:
+        self.fake_tools(
+            "echo 'error: No playable streams found' >&2; exit 1",
+            "sleep 0.5; cat > /dev/null",
+        )
+        with patch.object(twitch_follows, "notify") as notify:
+            code = twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+        self.assertEqual(code, 1)
+        notify.assert_called_once_with(
+            "Could not play big", "error: No playable streams found"
+        )
+
+    def test_closing_mpv_stops_streamlink_without_notifying(self) -> None:
+        self.fake_tools("trap 'exit 1' TERM; sleep 5 & wait", "exit 0")
+        started = time.monotonic()
+        with patch.object(twitch_follows, "notify") as notify:
+            code = twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+        self.assertEqual(code, 0)
+        notify.assert_not_called()
+        self.assertLess(time.monotonic() - started, 3)
 
     def test_second_watch_of_same_channel_is_ignored(self) -> None:
+        self.fake_tools("printf video", "cat > /dev/null")
         with (
-            patch.object(twitch_follows.shutil, "which", return_value="/usr/bin/x"),
-            patch.object(twitch_follows.subprocess, "run") as run,
+            patch.object(twitch_follows.subprocess, "Popen") as popen,
             twitch_follows.file_lock("twitch-follows-watch-big.lock", blocking=False),
         ):
             self.assertEqual(twitch_follows.main(["--watch", "big"]), 0)
-        run.assert_not_called()
+        popen.assert_not_called()
 
     def test_chat_opens_separate_chatterino_with_only_that_channel(self) -> None:
         with (
