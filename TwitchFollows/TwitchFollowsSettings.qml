@@ -48,6 +48,29 @@ PluginSettings {
     }
 
     SelectionSetting {
+        settingKey: "volume"
+        label: "Starting volume"
+        description: "mpv volume when a stream opens."
+        defaultValue: "25"
+        options: [{
+            "label": "10%",
+            "value": "10"
+        }, {
+            "label": "25% (default)",
+            "value": "25"
+        }, {
+            "label": "50%",
+            "value": "50"
+        }, {
+            "label": "75%",
+            "value": "75"
+        }, {
+            "label": "100%",
+            "value": "100"
+        }]
+    }
+
+    SelectionSetting {
         settingKey: "refreshSeconds"
         label: "Refresh interval"
         description: "How often to check which followed channels are live."

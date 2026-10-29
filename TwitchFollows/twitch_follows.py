@@ -30,6 +30,7 @@ REQUEST_TIMEOUT_SECONDS = 10
 MAX_PAGES = 20
 CHATTERINO_FLATPAK_ID = "com.chatterino.chatterino"
 CHATTERINO_START_SECONDS = 20
+DEFAULT_VOLUME = 25
 CHATTERINO_SETTLE_SECONDS = 3
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,25}$")
 QUALITY_PATTERN = re.compile(r"^[A-Za-z0-9_,+-]{1,40}$")
@@ -243,7 +244,9 @@ def open_chat(login: str) -> int:
     return 0
 
 
-def watch(login: str, quality: str, chat_overlay: bool = True) -> int:
+def watch(
+    login: str, quality: str, chat_overlay: bool = True, volume: int = DEFAULT_VOLUME
+) -> int:
     streamlink = shutil.which("streamlink")
     if not streamlink:
         notify(
@@ -253,13 +256,15 @@ def watch(login: str, quality: str, chat_overlay: bool = True) -> int:
     with file_lock(f"twitch-follows-watch-{login}.lock", blocking=False) as acquired:
         if not acquired:
             return 0
-        return play(streamlink, login, quality, chat_overlay)
+        return play(streamlink, login, quality, chat_overlay, volume)
 
 
-def play(streamlink: str, login: str, quality: str, chat_overlay: bool) -> int:
+def play(
+    streamlink: str, login: str, quality: str, chat_overlay: bool, volume: int
+) -> int:
     # Open the window at once: during a pre-roll ad streamlink sends no data,
     # and mpv would otherwise stay invisible until the ad is over.
-    player_args = ["--force-window=immediate"]
+    player_args = ["--force-window=immediate", f"--volume={volume}"]
     overlay = None
     ipc_path = None
     if chat_overlay:
@@ -321,6 +326,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--quality", default="best", help="streamlink quality for --watch"
     )
     parser.add_argument(
+        "--volume",
+        type=int,
+        default=DEFAULT_VOLUME,
+        help="starting mpv volume (0-100) for --watch",
+    )
+    parser.add_argument(
         "--no-chat-overlay",
         action="store_true",
         help="do not draw chat on top of the --watch player",
@@ -344,7 +355,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.chat:
         return open_chat(login.lower())
     quality = args.quality if QUALITY_PATTERN.match(args.quality) else "best"
-    return watch(login.lower(), quality, not args.no_chat_overlay)
+    volume = min(max(args.volume, 0), 100)
+    return watch(login.lower(), quality, not args.no_chat_overlay, volume)
 
 
 if __name__ == "__main__":

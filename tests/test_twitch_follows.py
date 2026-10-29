@@ -187,7 +187,8 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(command[-1], "720p60,best")
         player_args = command[command.index("--player-args") + 1].split()
         self.assertIn("--force-window=immediate", player_args)
-        ipc_path = player_args[1].removeprefix("--input-ipc-server=")
+        self.assertIn("--volume=25", player_args)
+        ipc_path = player_args[2].removeprefix("--input-ipc-server=")
         overlay = popen.call_args.args[0]
         self.assertTrue(overlay[1].endswith("chat_overlay.py"))
         self.assertEqual(overlay[2:], ["big", ipc_path])
@@ -201,10 +202,13 @@ class LaunchTests(unittest.TestCase):
             ) as run,
             patch.object(twitch_follows.subprocess, "Popen") as popen,
         ):
-            twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+            twitch_follows.main(
+                ["--watch", "big", "--no-chat-overlay", "--volume", "250"]
+            )
         command = run.call_args.args[0]
         self.assertEqual(
-            command[command.index("--player-args") + 1], "--force-window=immediate"
+            command[command.index("--player-args") + 1],
+            "--force-window=immediate --volume=100",
         )
         popen.assert_not_called()
 

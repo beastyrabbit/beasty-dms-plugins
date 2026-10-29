@@ -22,7 +22,7 @@ dms ipc call plugin-scan scan
 dms ipc call plugins enable twitchFollows
 ```
 
-Then add the **Twitch Follows** widget to DankBar. DMS Settings → Plugins → Twitch Follows sets the stream quality, the refresh interval (default 2 minutes), whether chat is drawn in the player, and whether offline channels are listed.
+Then add the **Twitch Follows** widget to DankBar. DMS Settings → Plugins → Twitch Follows sets the stream quality, the starting volume (default 25%), the refresh interval (default 2 minutes), whether chat is drawn in the player, and whether offline channels are listed.
 
 ## Quick AI setup
 
