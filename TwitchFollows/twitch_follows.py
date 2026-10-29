@@ -32,6 +32,16 @@ CHATTERINO_FLATPAK_ID = "com.chatterino.chatterino"
 DEFAULT_VOLUME = 25
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,25}$")
 QUALITY_PATTERN = re.compile(r"^[A-Za-z0-9_,+-]{1,40}$")
+# streamlink tries these in order. Each setting is a ceiling: step down through
+# Twitch's renditions (named like 720p60 or 480p30) and only fall back to the
+# best stream when the channel has no transcodes at or below it.
+QUALITY_FALLBACKS = {
+    "best": "best",
+    "1080p60": "1080p60,1080p30,720p60,720p30,best",
+    "720p60": "720p60,720p30,480p30,360p30,best",
+    "480p": "480p30,360p30,160p30,best",
+    "audio_only": "audio_only,worst",
+}
 
 
 class TwitchError(Exception):
@@ -267,7 +277,7 @@ def play(
                     "--stdout",
                     "--twitch-low-latency",
                     f"https://twitch.tv/{login}",
-                    f"{quality},best",
+                    QUALITY_FALLBACKS.get(quality, f"{quality},best"),
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,

@@ -185,7 +185,7 @@ class LaunchTests(unittest.TestCase):
                 "--stdout",
                 "--twitch-low-latency",
                 "https://twitch.tv/big",
-                "720p60,best",
+                "720p60,720p30,480p30,360p30,best",
             ],
         )
         mpv_args = (bin_dir / "mpv.args").read_text()

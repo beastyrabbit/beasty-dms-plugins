@@ -27,7 +27,7 @@ PluginSettings {
     SelectionSetting {
         settingKey: "quality"
         label: "Stream quality"
-        description: "Falls back to the best available quality when the stream doesn't offer this one."
+        description: "The highest quality to use. If a channel doesn't offer it, the next lower one plays."
         defaultValue: "best"
         options: [{
             "label": "Best (default)",
