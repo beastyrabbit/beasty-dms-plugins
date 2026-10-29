@@ -12,6 +12,7 @@ PluginComponent {
     readonly property int refreshSeconds: parseInt(pluginData.refreshSeconds ?? "120") || 120
     readonly property bool showOffline: pluginData.showOffline ?? true
     readonly property string quality: pluginData.quality || "best"
+    readonly property bool chatOverlay: pluginData.chatOverlay ?? true
 
     // Shared by every bar instance (one per screen), so only one fetch runs per interval.
     readonly property var follows: followsVar.value
@@ -79,7 +80,10 @@ PluginComponent {
     }
 
     function watch(login) {
-        Quickshell.execDetached(["python3", helperPath, "--watch", login, "--quality", quality]);
+        const command = ["python3", helperPath, "--watch", login, "--quality", quality];
+        if (!chatOverlay)
+            command.push("--no-chat-overlay");
+        Quickshell.execDetached(command);
     }
 
     function openChat(login) {

@@ -169,6 +169,7 @@ class LaunchTests(unittest.TestCase):
             patch.object(
                 twitch_follows.subprocess, "run", return_value=completed
             ) as run,
+            patch.object(twitch_follows.subprocess, "Popen") as popen,
         ):
             self.assertEqual(
                 twitch_follows.main(["--watch", "Big", "--quality", "720p60"]), 0
@@ -176,6 +177,25 @@ class LaunchTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("https://twitch.tv/big", command)
         self.assertEqual(command[-1], "720p60,best")
+        ipc_arg = command[command.index("--player-args") + 1]
+        self.assertTrue(ipc_arg.startswith("--input-ipc-server="))
+        overlay = popen.call_args.args[0]
+        self.assertTrue(overlay[1].endswith("chat_overlay.py"))
+        self.assertEqual(overlay[2:], ["big", ipc_arg.split("=", 1)[1]])
+        popen.return_value.terminate.assert_called_once()
+
+    def test_watch_without_chat_overlay(self) -> None:
+        completed = twitch_follows.subprocess.CompletedProcess([], 0, "", "")
+        with (
+            patch.object(twitch_follows.shutil, "which", return_value="/usr/bin/x"),
+            patch.object(
+                twitch_follows.subprocess, "run", return_value=completed
+            ) as run,
+            patch.object(twitch_follows.subprocess, "Popen") as popen,
+        ):
+            twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+        self.assertNotIn("--player-args", run.call_args.args[0])
+        popen.assert_not_called()
 
     def test_chat_activates_channel_in_chatterino(self) -> None:
         with (

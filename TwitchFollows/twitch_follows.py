@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -201,28 +202,52 @@ def open_chat(login: str) -> int:
     return 0
 
 
-def watch(login: str, quality: str) -> int:
+def watch(login: str, quality: str, chat_overlay: bool = True) -> int:
     streamlink = shutil.which("streamlink")
     if not streamlink:
         notify(
             "streamlink is not installed", "Install it with: sudo pacman -S streamlink"
         )
         return 1
-    result = subprocess.run(
-        [
-            streamlink,
-            "--player",
-            "mpv",
-            "--title",
-            "{author} - {title}",
-            f"https://twitch.tv/{login}",
-            f"{quality},best",
-        ],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    command = [
+        streamlink,
+        "--player",
+        "mpv",
+        "--title",
+        "{author} - {title}",
+    ]
+    overlay = None
+    ipc_path = None
+    if chat_overlay:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+        ipc_path = os.path.join(
+            runtime_dir, f"twitch-follows-{login}-{os.getpid()}.sock"
+        )
+        command += ["--player-args", f"--input-ipc-server={ipc_path}"]
+        overlay = subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).with_name("chat_overlay.py")),
+                login,
+                ipc_path,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    try:
+        result = subprocess.run(
+            [*command, f"https://twitch.tv/{login}", f"{quality},best"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        if overlay:
+            overlay.terminate()
+        if ipc_path:
+            Path(ipc_path).unlink(missing_ok=True)
     if result.returncode != 0:
         lines = (result.stderr or result.stdout).strip().splitlines()
         notify(f"Could not play {login}", lines[-1] if lines else "streamlink failed.")
@@ -241,6 +266,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     group.add_argument("--chat", metavar="LOGIN", help="open a channel in Chatterino")
     parser.add_argument(
         "--quality", default="best", help="streamlink quality for --watch"
+    )
+    parser.add_argument(
+        "--no-chat-overlay",
+        action="store_true",
+        help="do not draw chat on top of the --watch player",
     )
     return parser.parse_args(argv)
 
@@ -261,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.chat:
         return open_chat(login.lower())
     quality = args.quality if QUALITY_PATTERN.match(args.quality) else "best"
-    return watch(login.lower(), quality)
+    return watch(login.lower(), quality, not args.no_chat_overlay)
 
 
 if __name__ == "__main__":

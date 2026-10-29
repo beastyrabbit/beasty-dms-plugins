@@ -65,6 +65,13 @@ PluginSettings {
     }
 
     ToggleSetting {
+        settingKey: "chatOverlay"
+        label: "Show chat in the player"
+        description: "Draw the channel's chat over the stream. Press C in mpv to hide or show it."
+        defaultValue: true
+    }
+
+    ToggleSetting {
         settingKey: "showOffline"
         label: "Show offline channels"
         description: "List offline followed channels below the live ones, with a chat button."
