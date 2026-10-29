@@ -14,7 +14,7 @@ Personal [DMS](https://github.com/dangass/dms) plugins for Hyprland and niri.
 
 ## Twitch Follows setup
 
-Twitch Follows reads the account you are logged in with in Chatterino (Flatpak or native), so it needs no Twitch app registration or separate token. If the Chatterino login expires, the dropdown says so; log in again in Chatterino. Streams play in their own mpv window through streamlink, with the channel's chat drawn in the bottom-left corner (read anonymously over Twitch IRC; press `c` in mpv to hide or show it). The chat button opens the channel as a tab in Chatterino.
+Twitch Follows reads the account you are logged in with in Chatterino (Flatpak or native), so it needs no Twitch app registration or separate token. If the Chatterino login expires, the dropdown says so; log in again in Chatterino. Streams play in their own mpv window through streamlink, with the channel's chat drawn in the bottom-left corner (read anonymously over Twitch IRC; press `c` in mpv to hide or show it). The chat button opens a separate Chatterino window with only that channel; it does not change your saved Chatterino layout.
 
 ```bash
 sudo pacman -S streamlink

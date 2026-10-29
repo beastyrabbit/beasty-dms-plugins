@@ -194,34 +194,28 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(twitch_follows.main(["--watch", "big"]), 0)
         run.assert_not_called()
 
-    def test_chat_activates_channel_in_running_chatterino(self) -> None:
+    def test_chat_opens_separate_chatterino_with_only_that_channel(self) -> None:
         with (
             patch.object(
                 twitch_follows, "chatterino_command", return_value=["chatterino"]
             ),
-            patch.object(twitch_follows, "chatterino_running", return_value=True),
-            patch.object(twitch_follows.subprocess, "Popen") as popen,
-            patch.object(twitch_follows.time, "sleep") as sleep,
+            patch.object(
+                twitch_follows.subprocess, "run", return_value=self.completed
+            ) as run,
         ):
             self.assertEqual(twitch_follows.main(["--chat", "big"]), 0)
-        self.assertEqual(popen.call_args.args[0], ["chatterino", "--activate", "t:big"])
-        sleep.assert_not_called()
+        self.assertEqual(run.call_args.args[0], ["chatterino", "-c", "t:big"])
 
-    def test_chat_cold_start_waits_before_releasing_lock(self) -> None:
+    def test_second_chat_for_same_channel_is_ignored(self) -> None:
         with (
             patch.object(
                 twitch_follows, "chatterino_command", return_value=["chatterino"]
             ),
-            patch.object(
-                twitch_follows, "chatterino_running", side_effect=[False, False, True]
-            ),
-            patch.object(twitch_follows.subprocess, "Popen"),
-            patch.object(twitch_follows.time, "sleep") as sleep,
+            patch.object(twitch_follows.subprocess, "run") as run,
+            twitch_follows.file_lock("twitch-follows-chat-big.lock", blocking=False),
         ):
             self.assertEqual(twitch_follows.main(["--chat", "big"]), 0)
-        self.assertEqual(
-            sleep.call_args.args[0], twitch_follows.CHATTERINO_SETTLE_SECONDS
-        )
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

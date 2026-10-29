@@ -17,7 +17,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,9 +28,7 @@ HELIX_URL = "https://api.twitch.tv/helix"
 REQUEST_TIMEOUT_SECONDS = 10
 MAX_PAGES = 20
 CHATTERINO_FLATPAK_ID = "com.chatterino.chatterino"
-CHATTERINO_START_SECONDS = 20
 DEFAULT_VOLUME = 25
-CHATTERINO_SETTLE_SECONDS = 3
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,25}$")
 QUALITY_PATTERN = re.compile(r"^[A-Za-z0-9_,+-]{1,40}$")
 
@@ -181,38 +178,24 @@ def file_lock(name: str, blocking: bool) -> Iterator[bool]:
         yield True
 
 
-def chatterino_running() -> bool:
-    return (
-        subprocess.run(
-            ["pgrep", "-x", "chatterino"], capture_output=True, check=False
-        ).returncode
-        == 0
-    )
-
-
 def open_chat(login: str) -> int:
     command = chatterino_command()
     if not command:
         notify("Chatterino is not installed", "Install Chatterino to open chat.")
         return 1
-    # A running Chatterino takes --activate from a second launch and that launch
-    # exits. While it is still starting, a second launch opens another window,
-    # so clicks wait here until the first instance has had time to start.
-    with file_lock("twitch-follows-chat.lock", blocking=True):
-        cold_start = not chatterino_running()
-        subprocess.Popen(
-            [*command, "--activate", f"t:{login}"],
+    # -c starts a separate Chatterino with only this channel and without saving
+    # its layout; --activate would add a tab to the saved main window instead.
+    # The lock is held while the window is open so a second click is ignored.
+    with file_lock(f"twitch-follows-chat-{login}.lock", blocking=False) as acquired:
+        if not acquired:
+            return 0
+        return subprocess.run(
+            [*command, "-c", f"t:{login}"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        if cold_start:
-            deadline = time.monotonic() + CHATTERINO_START_SECONDS
-            while time.monotonic() < deadline and not chatterino_running():
-                time.sleep(0.25)
-            time.sleep(CHATTERINO_SETTLE_SECONDS)
-    return 0
+            check=False,
+        ).returncode
 
 
 def watch(
