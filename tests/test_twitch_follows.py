@@ -157,17 +157,24 @@ class FetchTests(unittest.TestCase):
 
 
 class LaunchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        runtime = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime.cleanup)
+        env = patch.dict(twitch_follows.os.environ, {"XDG_RUNTIME_DIR": runtime.name})
+        env.start()
+        self.addCleanup(env.stop)
+        self.completed = twitch_follows.subprocess.CompletedProcess([], 0, "", "")
+
     def test_rejects_invalid_channel_names(self) -> None:
         with patch.object(twitch_follows.subprocess, "run") as run:
             self.assertEqual(twitch_follows.main(["--watch", "a;rm -rf"]), 2)
         run.assert_not_called()
 
     def test_watch_runs_streamlink_with_quality_fallback(self) -> None:
-        completed = twitch_follows.subprocess.CompletedProcess([], 0, "", "")
         with (
             patch.object(twitch_follows.shutil, "which", return_value="/usr/bin/x"),
             patch.object(
-                twitch_follows.subprocess, "run", return_value=completed
+                twitch_follows.subprocess, "run", return_value=self.completed
             ) as run,
             patch.object(twitch_follows.subprocess, "Popen") as popen,
         ):
@@ -176,36 +183,68 @@ class LaunchTests(unittest.TestCase):
             )
         command = run.call_args.args[0]
         self.assertIn("https://twitch.tv/big", command)
+        self.assertIn("--twitch-low-latency", command)
         self.assertEqual(command[-1], "720p60,best")
-        ipc_arg = command[command.index("--player-args") + 1]
-        self.assertTrue(ipc_arg.startswith("--input-ipc-server="))
+        player_args = command[command.index("--player-args") + 1].split()
+        self.assertIn("--force-window=immediate", player_args)
+        ipc_path = player_args[1].removeprefix("--input-ipc-server=")
         overlay = popen.call_args.args[0]
         self.assertTrue(overlay[1].endswith("chat_overlay.py"))
-        self.assertEqual(overlay[2:], ["big", ipc_arg.split("=", 1)[1]])
+        self.assertEqual(overlay[2:], ["big", ipc_path])
         popen.return_value.terminate.assert_called_once()
 
     def test_watch_without_chat_overlay(self) -> None:
-        completed = twitch_follows.subprocess.CompletedProcess([], 0, "", "")
         with (
             patch.object(twitch_follows.shutil, "which", return_value="/usr/bin/x"),
             patch.object(
-                twitch_follows.subprocess, "run", return_value=completed
+                twitch_follows.subprocess, "run", return_value=self.completed
             ) as run,
             patch.object(twitch_follows.subprocess, "Popen") as popen,
         ):
             twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
-        self.assertNotIn("--player-args", run.call_args.args[0])
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--player-args") + 1], "--force-window=immediate"
+        )
         popen.assert_not_called()
 
-    def test_chat_activates_channel_in_chatterino(self) -> None:
+    def test_second_watch_of_same_channel_is_ignored(self) -> None:
+        with (
+            patch.object(twitch_follows.shutil, "which", return_value="/usr/bin/x"),
+            patch.object(twitch_follows.subprocess, "run") as run,
+            twitch_follows.file_lock("twitch-follows-watch-big.lock", blocking=False),
+        ):
+            self.assertEqual(twitch_follows.main(["--watch", "big"]), 0)
+        run.assert_not_called()
+
+    def test_chat_activates_channel_in_running_chatterino(self) -> None:
         with (
             patch.object(
                 twitch_follows, "chatterino_command", return_value=["chatterino"]
             ),
+            patch.object(twitch_follows, "chatterino_running", return_value=True),
             patch.object(twitch_follows.subprocess, "Popen") as popen,
+            patch.object(twitch_follows.time, "sleep") as sleep,
         ):
             self.assertEqual(twitch_follows.main(["--chat", "big"]), 0)
         self.assertEqual(popen.call_args.args[0], ["chatterino", "--activate", "t:big"])
+        sleep.assert_not_called()
+
+    def test_chat_cold_start_waits_before_releasing_lock(self) -> None:
+        with (
+            patch.object(
+                twitch_follows, "chatterino_command", return_value=["chatterino"]
+            ),
+            patch.object(
+                twitch_follows, "chatterino_running", side_effect=[False, False, True]
+            ),
+            patch.object(twitch_follows.subprocess, "Popen"),
+            patch.object(twitch_follows.time, "sleep") as sleep,
+        ):
+            self.assertEqual(twitch_follows.main(["--chat", "big"]), 0)
+        self.assertEqual(
+            sleep.call_args.args[0], twitch_follows.CHATTERINO_SETTLE_SECONDS
+        )
 
 
 if __name__ == "__main__":

@@ -243,11 +243,17 @@ def run(channel: str, ipc_path: str) -> int:
     feed = ChatFeed(channel)
     threading.Thread(target=feed.run_forever, daemon=True).start()
     mpv.send(["keybind", TOGGLE_KEY, f"script-message {TOGGLE_MESSAGE}"])
+    # Twitch pre-roll ads can hold back the video for half a minute.
+    mpv.send(["show-text", f"Loading {channel}…", 60000])
+    loading = True
     hidden = False
     last_draw = 0.0
     try:
         while True:
             for event in mpv.events(timeout=1.0):
+                if loading and event.get("event") == "playback-restart":
+                    loading = False
+                    mpv.send(["show-text", "", 1])
                 if event.get("event") == "client-message" and event.get("args") == [
                     TOGGLE_MESSAGE
                 ]:
