@@ -1,1 +1,0 @@
-/mnt/storage/workspace/projects/my_task_bar/agent.md

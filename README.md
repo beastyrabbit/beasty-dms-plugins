@@ -1,14 +1,14 @@
 # beasty-dms-plugins
 
 
-Personal [DMS](https://github.com/dangass/dms) plugins for niri.
+Personal [DMS](https://github.com/dangass/dms) plugins for Hyprland and niri.
 
 ## Plugins
 
 - **QuickJump** — bar buttons to focus running apps (Discord, WhatsApp, Fastmail, Steam, 1Password)
 - **Cowork** — launcher picker for opening `~/cowork` with Codex, Claude, or Pi
-- **CatppuccinWorkspaces** — Catppuccin Mocha workspace indicator
-- **CopyQClipboard** — clipboard history via CopyQ (disabled)
+- **HyprlandWorkspaces** — rainbow Hyprland workspace switcher with named workspaces and scratchpads
+- **CatppuccinWorkspaces** — Catppuccin Mocha workspace indicator for niri (disabled)
 - **Quick AI** — type `?` for quick questions, translation, and input or clipboard summaries
 
 ## Quick AI setup
