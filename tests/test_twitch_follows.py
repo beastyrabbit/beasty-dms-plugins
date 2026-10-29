@@ -185,7 +185,7 @@ class LaunchTests(unittest.TestCase):
                 "--stdout",
                 "--twitch-low-latency",
                 "https://twitch.tv/big",
-                "720p60,720p30,480p30,360p30,best",
+                "720p60,720p,720p30,480p,480p30,360p,360p30,160p,160p30,best",
             ],
         )
         mpv_args = (bin_dir / "mpv.args").read_text()
@@ -204,6 +204,16 @@ class LaunchTests(unittest.TestCase):
         mpv_args = (bin_dir / "mpv.args").read_text()
         self.assertIn("--volume=100", mpv_args)
         self.assertIn(f"--input-ipc-server={overlay[3]}", mpv_args)
+
+    def test_chat_setting_off_still_starts_relay_hidden_for_jump_to_live(self) -> None:
+        self.fake_tools("printf video", "cat > /dev/null")
+        with patch.object(
+            twitch_follows.subprocess, "Popen", wraps=subprocess.Popen
+        ) as popen:
+            twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+        overlay = popen.call_args_list[0].args[0]
+        self.assertTrue(overlay[1].endswith("chat_overlay.py"))
+        self.assertEqual(overlay[4:], ["--hidden"])
 
     def test_failed_stream_notifies_with_streamlink_error(self) -> None:
         self.fake_tools(

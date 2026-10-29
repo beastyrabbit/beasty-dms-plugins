@@ -32,14 +32,25 @@ CHATTERINO_FLATPAK_ID = "com.chatterino.chatterino"
 DEFAULT_VOLUME = 25
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,25}$")
 QUALITY_PATTERN = re.compile(r"^[A-Za-z0-9_,+-]{1,40}$")
-# streamlink tries these in order. Each setting is a ceiling: step down through
-# Twitch's renditions (named like 720p60 or 480p30) and only fall back to the
-# best stream when the channel has no transcodes at or below it.
+# Twitch renditions from highest to lowest. Transcodes are named like 480p30;
+# a source stream can have no frame rate in its name (720p).
+RENDITIONS = [
+    "1080p60", "1080p", "1080p30", "720p60", "720p", "720p30",
+    "480p", "480p30", "360p", "360p30", "160p", "160p30",
+]  # fmt: skip
+
+
+def ceiling(quality: str) -> str:
+    """streamlink tries these in order: the setting and everything below it,
+    then the best stream when the channel has nothing at or below it."""
+    return ",".join([*RENDITIONS[RENDITIONS.index(quality) :], "best"])
+
+
 QUALITY_FALLBACKS = {
     "best": "best",
-    "1080p60": "1080p60,1080p30,720p60,720p30,best",
-    "720p60": "720p60,720p30,480p30,360p30,best",
-    "480p": "480p30,360p30,160p30,best",
+    "1080p60": ceiling("1080p60"),
+    "720p60": ceiling("720p60"),
+    "480p": ceiling("480p"),
     "audio_only": "audio_only,worst",
 }
 
@@ -250,22 +261,22 @@ def play(
         f"--volume={volume}",
         f"--force-media-title={media_title}",
     ]
-    overlay = None
-    ipc_path = None
-    if chat_overlay:
-        ipc_path = runtime_path(f"twitch-follows-{login}-{os.getpid()}.sock")
-        player.append(f"--input-ipc-server={ipc_path}")
-        overlay = subprocess.Popen(
-            [
-                sys.executable,
-                str(Path(__file__).with_name("chat_overlay.py")),
-                login,
-                str(ipc_path),
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+    # The chat relay always runs because it also handles `End` (jump to live);
+    # the setting only decides whether chat starts visible.
+    ipc_path = runtime_path(f"twitch-follows-{login}-{os.getpid()}.sock")
+    player.append(f"--input-ipc-server={ipc_path}")
+    overlay = subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).with_name("chat_overlay.py")),
+            login,
+            str(ipc_path),
+            *([] if chat_overlay else ["--hidden"]),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     # streamlink's log goes to a file: a pipe nobody reads could fill up and
     # stall a long stream.
     log_path = runtime_path(f"twitch-follows-{login}.log")
@@ -302,11 +313,9 @@ def play(
                 source.terminate()
             source.wait()
     finally:
-        if overlay:
-            overlay.terminate()
-            overlay.wait()
-        if ipc_path:
-            ipc_path.unlink(missing_ok=True)
+        overlay.terminate()
+        overlay.wait()
+        ipc_path.unlink(missing_ok=True)
     if stream_failed:
         lines = log_path.read_text(errors="replace").strip().splitlines()
         notify(f"Could not play {login}", lines[-1] if lines else "streamlink failed.")
@@ -339,7 +348,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-chat-overlay",
         action="store_true",
-        help="do not draw chat on top of the --watch player",
+        help="start the --watch player with chat hidden",
     )
     return parser.parse_args(argv)
 

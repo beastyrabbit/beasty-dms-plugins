@@ -249,13 +249,13 @@ def connect_mpv(path: str) -> Mpv | None:
     return None
 
 
-def run(channel: str, ipc_path: str) -> int:
+def run(channel: str, ipc_path: str, hidden: bool = False) -> int:
     mpv = connect_mpv(ipc_path)
     if not mpv:
         return 1
     feed = ChatFeed(channel)
     threading.Thread(target=feed.run_forever, daemon=True).start()
-    mpv.send(["set_property", VISIBLE_PROPERTY, "yes"])
+    mpv.send(["set_property", VISIBLE_PROPERTY, "no" if hidden else "yes"])
     mpv.send(["set_property", MARKER_PROPERTY, True])
     mpv.send(["observe_property", 1, VISIBLE_PROPERTY])
     mpv.send(["keybind", TOGGLE_KEY, f"script-message {TOGGLE_MESSAGE}"])
@@ -263,7 +263,6 @@ def run(channel: str, ipc_path: str) -> int:
     # Twitch pre-roll ads can hold back the video for half a minute.
     mpv.send(["show-text", f"Loading {channel}…", 60000])
     loading = True
-    hidden = False
     last_draw = 0.0
     try:
         while True:
@@ -305,7 +304,11 @@ def run(channel: str, ipc_path: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("usage: chat_overlay.py CHANNEL MPV_IPC_SOCKET", file=sys.stderr)
+    if len(sys.argv) not in (3, 4) or sys.argv[3:] not in ([], ["--hidden"]):
+        print(
+            "usage: chat_overlay.py CHANNEL MPV_IPC_SOCKET [--hidden]", file=sys.stderr
+        )
         raise SystemExit(2)
-    raise SystemExit(run(sys.argv[1].lower(), sys.argv[2]))
+    raise SystemExit(
+        run(sys.argv[1].lower(), sys.argv[2], sys.argv[3:] == ["--hidden"])
+    )
