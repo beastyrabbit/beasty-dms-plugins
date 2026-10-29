@@ -128,7 +128,7 @@ class ChatRenderer:
         self.bold = font_file("sans-serif:bold")
         self.italic = font_file("sans-serif:italic")
         # Messages keep their layout until the size changes or an emote arrives.
-        self.cache: dict[int, tuple[object, int, int, list[Line]]] = {}
+        self.cache: dict[int, tuple[object, tuple[int, int, int], list[Line]]] = {}
         self.version = 0
 
     def invalidate(self) -> None:
@@ -165,11 +165,12 @@ class ChatRenderer:
         return Panel(left, max(0, bottom - height), panel_width, height, placed)
 
     def _message_lines(self, message, size: int, width: int) -> list[Line]:
+        key = (size, width, self.version)
         cached = self.cache.get(id(message))
-        if cached and cached[0] is message and cached[1:3] == (size, self.version):
-            return cached[3]
+        if cached and cached[0] is message and cached[1] == key:
+            return cached[2]
         lines = self._build(message, size, width)
-        self.cache[id(message)] = (message, size, self.version, lines)
+        self.cache[id(message)] = (message, key, lines)
         return lines
 
     def _build(self, message, size: int, width: int) -> list[Line]:

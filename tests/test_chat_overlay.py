@@ -72,5 +72,25 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(chat_overlay.render([], 0.0), "")
 
 
+@unittest.skipUnless(importlib.util.find_spec("PIL"), "needs Pillow")
+class ImageLayoutTests(unittest.TestCase):
+    def test_narrower_window_rewraps_cached_lines(self) -> None:
+        sys.path.insert(0, str(MODULE_PATH.parent))
+        self.addCleanup(sys.path.remove, str(MODULE_PATH.parent))
+        import chat_image
+        import emotes
+
+        renderer = chat_image.ChatRenderer(
+            emotes.EmoteCatalog(lambda: None), emotes.EmoteImages(lambda: None)
+        )
+        message = chat_overlay.ChatMessage(
+            "Ann", "#FF8000", "a fairly long chat message " * 3, False, 0.0
+        )
+        wide = renderer.layout([message], 1280, 720)
+        narrow = renderer.layout([message], 300, 720)
+        self.assertLessEqual(narrow.width, 300)
+        self.assertGreater(narrow.height, wide.height)
+
+
 if __name__ == "__main__":
     unittest.main()
