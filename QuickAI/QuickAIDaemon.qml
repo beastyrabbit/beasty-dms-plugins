@@ -130,7 +130,8 @@ PluginComponent {
         const request = pendingRequest;
         pendingRequest = null;
         const model = pluginService ? pluginService.loadPluginData("quickAi", "model", "") : "";
-        const arguments = ["python3", helperPath, "--model", model, "--mode", request.mode, "--target", request.target];
+        const effort = pluginService ? pluginService.loadPluginData("quickAi", "effort", "") : "";
+        const arguments = ["python3", helperPath, "--model", model, "--effort", effort, "--mode", request.mode, "--target", request.target];
         if (request.clipboard)
             arguments.push("--clipboard");
         else

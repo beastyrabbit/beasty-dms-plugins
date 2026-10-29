@@ -287,6 +287,22 @@ class ModelSelectionTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--model") + 1], "claude-haiku-5-5")
 
+    def test_selected_effort_is_used(self) -> None:
+        command = quick_ai.build_command("ask", "auto", "/tmp/work", effort="high")
+        self.assertIn('model_reasoning_effort="high"', command)
+
+    def test_empty_effort_falls_back_to_default(self) -> None:
+        args = quick_ai.parse_args(["--effort", "", "--mode", "ask", "--query", "x"])
+        self.assertEqual(args.effort, quick_ai.DEFAULT_EFFORT)
+
+    def test_unknown_effort_is_rejected(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            quick_ai.parse_args(["--effort", "ultra", "--mode", "ask", "--query", "x"])
+
+    def test_unsupported_effort_error_is_friendly(self) -> None:
+        stderr = "Unsupported value: 'max' is not supported for reasoning.effort"
+        self.assertEqual(quick_ai.friendly_error(stderr, 1)[0], "effort")
+
     def test_empty_model_falls_back_to_default(self) -> None:
         args = quick_ai.parse_args(["--model", "", "--mode", "ask", "--query", "x"])
         self.assertEqual(args.model, quick_ai.DEFAULT_MODEL)

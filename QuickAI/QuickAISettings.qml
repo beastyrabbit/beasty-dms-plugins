@@ -64,4 +64,33 @@ PluginSettings {
         defaultValue: root.defaultModel
     }
 
+    SelectionSetting {
+        settingKey: "effort"
+        label: "Thinking level"
+        description: "How long the model reasons before answering. Higher levels are slower."
+        defaultValue: "low"
+        options: [{
+            "label": "None",
+            "value": "none"
+        }, {
+            "label": "Minimal",
+            "value": "minimal"
+        }, {
+            "label": "Low (default)",
+            "value": "low"
+        }, {
+            "label": "Medium",
+            "value": "medium"
+        }, {
+            "label": "High",
+            "value": "high"
+        }, {
+            "label": "Extra high",
+            "value": "xhigh"
+        }, {
+            "label": "Max",
+            "value": "max"
+        }]
+    }
+
 }

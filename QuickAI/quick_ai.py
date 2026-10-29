@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_MODEL = "gpt-5.6-terra"
+EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+DEFAULT_EFFORT = "low"
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$")
 # Proxy models that cannot answer text prompts through `codex exec`.
 UNUSABLE_MODEL_PATTERN = re.compile(r"image|auto-review")
@@ -179,6 +181,7 @@ def build_command(
     codex_path: str = "codex",
     provider: dict[str, Any] | None = None,
     model: str = DEFAULT_MODEL,
+    effort: str = DEFAULT_EFFORT,
 ) -> list[str]:
     del target
     command = [
@@ -213,7 +216,7 @@ def build_command(
         "--model",
         model,
         "-c",
-        'model_reasoning_effort="low"',
+        f'model_reasoning_effort="{effort}"',
         "-C",
         workdir,
     ]
@@ -244,6 +247,14 @@ def friendly_error(stderr: str, return_code: int) -> tuple[str, str]:
             "network",
             "Could not reach Codex. Check the network connection and retry.",
         )
+    if "reasoning" in lowered and any(
+        word in lowered for word in ("unsupported", "not supported", "invalid value")
+    ):
+        return (
+            "effort",
+            "This model does not support the chosen thinking level. "
+            "Pick another in the Quick AI settings.",
+        )
     if "model" in lowered and any(
         word in lowered for word in ("not found", "unsupported", "unavailable")
     ):
@@ -273,7 +284,11 @@ def _signal_handler(_signum: int, _frame: Any) -> None:
 
 
 def execute(
-    mode: str, query: str, target: str, model: str = DEFAULT_MODEL
+    mode: str,
+    query: str,
+    target: str,
+    model: str = DEFAULT_MODEL,
+    effort: str = DEFAULT_EFFORT,
 ) -> dict[str, Any]:
     global _child
     started = time.monotonic()
@@ -296,7 +311,9 @@ def execute(
         environment[PROVIDER_TOKEN_ENV] = provider_token(provider) or ""
 
     with tempfile.TemporaryDirectory(prefix="dms-quick-ai-") as workdir:
-        command = build_command(mode, target, workdir, codex_path, provider, model)
+        command = build_command(
+            mode, target, workdir, codex_path, provider, model, effort
+        )
         try:
             _child = subprocess.Popen(
                 command,
@@ -386,6 +403,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--list-models", action="store_true", help="list models Quick AI can use"
     )
     parser.add_argument("--model", default=DEFAULT_MODEL, help="model to answer with")
+    parser.add_argument(
+        "--effort",
+        choices=("", *EFFORTS),
+        default=DEFAULT_EFFORT,
+        help="reasoning effort (thinking level)",
+    )
     parser.add_argument("--mode", choices=("ask", "translate", "summarize"))
     parser.add_argument("--target", choices=("auto", "en", "de"), default="auto")
     parser.add_argument("--query")
@@ -397,6 +420,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     # An empty --model (no setting saved yet) means the default.
     args.model = args.model or DEFAULT_MODEL
+    args.effort = args.effort or DEFAULT_EFFORT
     if not MODEL_PATTERN.match(args.model):
         parser.error("invalid --model")
     if args.check or args.list_models:
@@ -536,7 +560,8 @@ def main(argv: list[str] | None = None) -> int:
         args.query = clipboard_text
     print(
         json.dumps(
-            execute(args.mode, args.query, args.target, args.model), ensure_ascii=False
+            execute(args.mode, args.query, args.target, args.model, args.effort),
+            ensure_ascii=False,
         )
     )
     return 0
