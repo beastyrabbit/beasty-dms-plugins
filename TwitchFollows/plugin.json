@@ -1,0 +1,15 @@
+{
+    "id": "twitchFollows",
+    "name": "Twitch Follows",
+    "description": "Live count of followed Twitch channels with buttons to watch in mpv or open chat in Chatterino",
+    "version": "1.0.0",
+    "author": "beasty",
+    "type": "widget",
+    "capabilities": ["dankbar-widget"],
+    "component": "./TwitchFollows.qml",
+    "icon": "live_tv",
+    "settings": "./TwitchFollowsSettings.qml",
+    "requires_dms": ">=2.0.0",
+    "dependencies": ["python3", "streamlink", "mpv"],
+    "permissions": ["process", "settings_read", "settings_write"]
+}
