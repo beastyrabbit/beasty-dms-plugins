@@ -80,15 +80,21 @@ PluginComponent {
         }, 0, 30000, root);
     }
 
+    // dms.service stops its whole cgroup on restart, which would close open
+    // streams; a separate scope keeps players and chat running across restarts.
+    function launch(args) {
+        Quickshell.execDetached(["systemd-run", "--user", "--scope", "--quiet", "--collect", "python3", helperPath].concat(args));
+    }
+
     function watch(login) {
-        const command = ["python3", helperPath, "--watch", login, "--quality", quality, "--volume", volume];
+        const args = ["--watch", login, "--quality", quality, "--volume", volume];
         if (!chatOverlay)
-            command.push("--no-chat-overlay");
-        Quickshell.execDetached(command);
+            args.push("--no-chat-overlay");
+        launch(args);
     }
 
     function openChat(login) {
-        Quickshell.execDetached(["python3", helperPath, "--chat", login]);
+        launch(["--chat", login]);
     }
 
     popoutWidth: 340
