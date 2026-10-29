@@ -2,8 +2,10 @@
 """Draw a channel's Twitch chat on top of an mpv window.
 
 Reads chat anonymously over Twitch IRC and renders the latest messages
-through mpv's JSON IPC as an OSD overlay. Press `c` in mpv, or the uosc chat
-button, to hide or show it; `End` jumps back to live. Exits when mpv closes.
+through mpv's JSON IPC. With Pillow installed, chat is drawn as an image with
+Twitch, 7TV, BTTV and FFZ emotes (`overlay-add`); without it, as plain ASS text.
+Press `c` in mpv, or the uosc chat button, to hide or show it; `End` jumps back
+to live. Exits when mpv closes.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import json
+import os
 import socket
 import ssl
 import sys
@@ -18,6 +21,14 @@ import textwrap
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
+
+try:
+    import chat_image
+    import emotes
+except ImportError:  # Pillow missing: fall back to text-only chat.
+    chat_image = None
+    emotes = None
 
 IRC_HOST = "irc.chat.twitch.tv"
 IRC_PORT = 6697
@@ -38,6 +49,10 @@ LIVE_MESSAGE = "twitch-go-live"
 LIVE_REQUEST_ID = 42
 # Stay this far behind the newest buffered frame so playback doesn't stall.
 LIVE_MARGIN_SECONDS = 1.5
+OSD_PROPERTY = "osd-dimensions"
+IMAGE_OVERLAY_ID = 0
+# Redraw rate while an animated emote is on screen.
+ANIMATION_FPS = 15
 # Twitch's palette for users who never picked a name color.
 DEFAULT_COLORS = (
     "#FF0000",
@@ -65,6 +80,8 @@ class ChatMessage:
     text: str
     action: bool
     received: float
+    # Twitch's own emotes as (first, last, emote id) character positions in `text`.
+    emotes: tuple[tuple[int, int, str], ...] = ()
 
 
 def parse_tags(raw: str) -> dict[str, str]:
@@ -75,11 +92,31 @@ def parse_tags(raw: str) -> dict[str, str]:
     return tags
 
 
+def split_tags(line: str) -> tuple[dict[str, str], str]:
+    if not line.startswith("@"):
+        return {}, line
+    raw_tags, _, line = line[1:].partition(" ")
+    return parse_tags(raw_tags), line
+
+
+def parse_emote_tag(raw: str, text_length: int) -> tuple[tuple[int, int, str], ...]:
+    """`25:0-4,12-16/1902:6-10` into sorted (first, last, id) positions."""
+    positions = []
+    for entry in raw.split("/"):
+        emote_id, _, ranges = entry.partition(":")
+        for span in ranges.split(","):
+            first, _, last = span.partition("-")
+            if (
+                first.isdigit()
+                and last.isdigit()
+                and int(first) <= int(last) < text_length
+            ):
+                positions.append((int(first), int(last), emote_id))
+    return tuple(sorted(positions))
+
+
 def parse_privmsg(line: str, now: float) -> ChatMessage | None:
-    tags: dict[str, str] = {}
-    if line.startswith("@"):
-        raw_tags, _, line = line[1:].partition(" ")
-        tags = parse_tags(raw_tags)
+    tags, line = split_tags(line)
     prefix, _, rest = line.partition(" ")
     command, _, rest = rest.partition(" ")
     if command != "PRIVMSG" or " :" not in rest:
@@ -91,7 +128,14 @@ def parse_privmsg(line: str, now: float) -> ChatMessage | None:
     if action:
         text = text[len("\x01ACTION ") : -1]
     color = tags.get("color") or default_color(login)
-    return ChatMessage(name, color, text, action, now)
+    positions = parse_emote_tag(tags.get("emotes", ""), len(text))
+    return ChatMessage(name, color, text, action, now, positions)
+
+
+def room_id(line: str) -> str:
+    """The channel's Twitch user id, which the emote providers are keyed by."""
+    tags, _ = split_tags(line)
+    return tags.get("room-id", "")
 
 
 def default_color(login: str) -> str:
@@ -143,8 +187,9 @@ def render(messages: list[ChatMessage], now: float) -> str:
 class ChatFeed:
     """Keeps the latest chat messages, reconnecting to Twitch IRC as needed."""
 
-    def __init__(self, channel: str) -> None:
+    def __init__(self, channel: str, on_room=None) -> None:
         self.channel = channel
+        self.on_room = on_room
         self.messages: collections.deque[ChatMessage] = collections.deque(
             maxlen=MAX_MESSAGES
         )
@@ -177,7 +222,9 @@ class ChatFeed:
             nick = f"justinfan{int(time.time()) % 100000}"
             irc.sendall(
                 (
-                    "CAP REQ :twitch.tv/tags\r\n"
+                    # `commands` adds ROOMSTATE, whose room-id lets emotes load
+                    # before the first message arrives.
+                    "CAP REQ :twitch.tv/tags twitch.tv/commands\r\n"
                     f"NICK {nick}\r\n"
                     f"JOIN #{self.channel}\r\n"
                 ).encode()
@@ -187,6 +234,8 @@ class ChatFeed:
                 if line.startswith("PING"):
                     irc.sendall(("PONG" + line[4:] + "\r\n").encode())
                     continue
+                if self.on_room and (room := room_id(line)):
+                    self.on_room(room)
                 message = parse_privmsg(line, time.time())
                 if message:
                     with self.lock:
@@ -219,6 +268,30 @@ class Mpv:
             }
         )
 
+    def show_image(self, path: Path, image, x: int, y: int) -> None:
+        # mpv copies the file while handling the command; writing a new file
+        # and renaming it means it never sees a half-written frame.
+        temporary = path.with_name(path.name + ".new")
+        temporary.write_bytes(chat_image.to_bgra(image))
+        os.replace(temporary, path)
+        self.send(
+            {
+                "name": "overlay-add",
+                "id": IMAGE_OVERLAY_ID,
+                "x": x,
+                "y": y,
+                "file": str(path),
+                "offset": 0,
+                "fmt": "bgra",
+                "w": image.width,
+                "h": image.height,
+                "stride": 4 * image.width,
+            }
+        )
+
+    def hide_image(self) -> None:
+        self.send(["overlay-remove", IMAGE_OVERLAY_ID])
+
     def events(self, timeout: float) -> list[dict]:
         """Return pending mpv events; raise EOFError when mpv has closed."""
         self.sock.settimeout(timeout)
@@ -249,58 +322,131 @@ def connect_mpv(path: str) -> Mpv | None:
     return None
 
 
+class Overlay:
+    """Keeps mpv's chat overlay in step with the chat feed and the user's toggles."""
+
+    def __init__(self, mpv: Mpv, channel: str, ipc_path: str, hidden: bool) -> None:
+        self.mpv = mpv
+        self.channel = channel
+        self.hidden = hidden
+        self.loading = True
+        self.last_draw = 0.0
+        self.animated = False
+        self.image_shown = False
+        self.osd = (0, 0)
+        self.image_path = Path(ipc_path).with_suffix(".chat.bgra")
+        # Set from download threads when an emote set or image arrives.
+        self.emotes_changed = threading.Event()
+        self.renderer = None
+        on_room = None
+        if chat_image:
+            catalog = emotes.EmoteCatalog(self.emotes_changed.set)
+            images = emotes.EmoteImages(self.emotes_changed.set)
+            self.renderer = chat_image.ChatRenderer(catalog, images)
+            catalog.load_global()
+            on_room = catalog.load_channel
+        self.feed = ChatFeed(channel, on_room)
+
+    def run(self) -> int:
+        threading.Thread(target=self.feed.run_forever, daemon=True).start()
+        self.mpv.send(
+            ["set_property", VISIBLE_PROPERTY, "no" if self.hidden else "yes"]
+        )
+        self.mpv.send(["set_property", MARKER_PROPERTY, True])
+        self.mpv.send(["observe_property", 1, VISIBLE_PROPERTY])
+        self.mpv.send(["observe_property", 2, OSD_PROPERTY])
+        self.mpv.send(["keybind", TOGGLE_KEY, f"script-message {TOGGLE_MESSAGE}"])
+        self.mpv.send(["keybind", LIVE_KEY, f"script-message {LIVE_MESSAGE}"])
+        # Twitch pre-roll ads can hold back the video for half a minute.
+        self.mpv.send(["show-text", f"Loading {self.channel}…", 60000])
+        try:
+            while True:
+                for event in self.mpv.events(timeout=self.wait_time()):
+                    self.handle(event)
+                self.draw_if_due()
+        except (EOFError, OSError):
+            return 0
+        finally:
+            self.image_path.unlink(missing_ok=True)
+
+    def wait_time(self) -> float:
+        if not self.animated or self.hidden:
+            return 1.0
+        next_frame = self.last_draw + 1 / ANIMATION_FPS
+        return max(0.005, next_frame - time.monotonic())
+
+    def handle(self, event: dict) -> None:
+        kind = event.get("event")
+        if kind == "client-message" and event.get("args") == [LIVE_MESSAGE]:
+            self.mpv.send(["get_property", "demuxer-cache-time"], LIVE_REQUEST_ID)
+        if event.get("request_id") == LIVE_REQUEST_ID and isinstance(
+            event.get("data"), (int, float)
+        ):
+            target = max(0.0, event["data"] - LIVE_MARGIN_SECONDS)
+            self.mpv.send(["seek", target, "absolute"])
+            self.mpv.send(["show-text", "Live"])
+        if kind == "client-message" and event.get("args") == [TOGGLE_MESSAGE]:
+            self.mpv.send(
+                ["set_property", VISIBLE_PROPERTY, "yes" if self.hidden else "no"]
+            )
+        if self.loading and kind == "playback-restart":
+            self.loading = False
+            self.mpv.send(["show-text", "", 1])
+        if kind != "property-change":
+            return
+        if (
+            event.get("name") == VISIBLE_PROPERTY
+            and (event.get("data") == "no") != self.hidden
+        ):
+            self.hidden = not self.hidden
+            self.mpv.send(["show-text", "Chat hidden" if self.hidden else "Chat shown"])
+            self.last_draw = 0.0
+        if event.get("name") == OSD_PROPERTY and isinstance(event.get("data"), dict):
+            size = (int(event["data"].get("w", 0)), int(event["data"].get("h", 0)))
+            if size != self.osd:
+                self.osd = size
+                self.last_draw = 0.0
+
+    def draw_if_due(self) -> None:
+        now = time.monotonic()
+        if self.emotes_changed.is_set() and self.renderer:
+            self.emotes_changed.clear()
+            self.renderer.invalidate()
+            self.last_draw = 0.0
+        interval = 1 / ANIMATION_FPS if self.animated and not self.hidden else 5
+        if self.feed.changed.is_set() or now - self.last_draw >= interval:
+            self.feed.changed.clear()
+            self.draw()
+            self.last_draw = now
+
+    def draw(self) -> None:
+        if not self.renderer:
+            self.mpv.show(render(self.feed.snapshot(), time.time()), self.hidden)
+            return
+        now = time.time()
+        recent = [
+            message
+            for message in self.feed.snapshot()
+            if now - message.received <= MAX_AGE_SECONDS
+        ]
+        panel = None
+        if not self.hidden and min(self.osd) > 0:
+            panel = self.renderer.layout(recent, *self.osd)
+        self.animated = bool(panel and panel.animated)
+        if panel:
+            image = panel.draw(time.monotonic() * 1000)
+            self.mpv.show_image(self.image_path, image, panel.x, panel.y)
+            self.image_shown = True
+        elif self.image_shown:
+            self.mpv.hide_image()
+            self.image_shown = False
+
+
 def run(channel: str, ipc_path: str, hidden: bool = False) -> int:
     mpv = connect_mpv(ipc_path)
     if not mpv:
         return 1
-    feed = ChatFeed(channel)
-    threading.Thread(target=feed.run_forever, daemon=True).start()
-    mpv.send(["set_property", VISIBLE_PROPERTY, "no" if hidden else "yes"])
-    mpv.send(["set_property", MARKER_PROPERTY, True])
-    mpv.send(["observe_property", 1, VISIBLE_PROPERTY])
-    mpv.send(["keybind", TOGGLE_KEY, f"script-message {TOGGLE_MESSAGE}"])
-    mpv.send(["keybind", LIVE_KEY, f"script-message {LIVE_MESSAGE}"])
-    # Twitch pre-roll ads can hold back the video for half a minute.
-    mpv.send(["show-text", f"Loading {channel}…", 60000])
-    loading = True
-    last_draw = 0.0
-    try:
-        while True:
-            for event in mpv.events(timeout=1.0):
-                if event.get("event") == "client-message" and event.get("args") == [
-                    LIVE_MESSAGE
-                ]:
-                    mpv.send(["get_property", "demuxer-cache-time"], LIVE_REQUEST_ID)
-                if event.get("request_id") == LIVE_REQUEST_ID and isinstance(
-                    event.get("data"), (int, float)
-                ):
-                    target = max(0.0, event["data"] - LIVE_MARGIN_SECONDS)
-                    mpv.send(["seek", target, "absolute"])
-                    mpv.send(["show-text", "Live"])
-                if event.get("event") == "client-message" and event.get("args") == [
-                    TOGGLE_MESSAGE
-                ]:
-                    mpv.send(
-                        ["set_property", VISIBLE_PROPERTY, "yes" if hidden else "no"]
-                    )
-                if loading and event.get("event") == "playback-restart":
-                    loading = False
-                    mpv.send(["show-text", "", 1])
-                if (
-                    event.get("event") == "property-change"
-                    and event.get("name") == VISIBLE_PROPERTY
-                    and (event.get("data") == "no") != hidden
-                ):
-                    hidden = not hidden
-                    mpv.send(["show-text", "Chat hidden" if hidden else "Chat shown"])
-                    last_draw = 0.0
-            now = time.monotonic()
-            if feed.changed.is_set() or now - last_draw > 5:
-                feed.changed.clear()
-                mpv.show(render(feed.snapshot(), time.time()), hidden)
-                last_draw = now
-    except (EOFError, OSError):
-        return 0
+    return Overlay(mpv, channel, ipc_path, hidden).run()
 
 
 if __name__ == "__main__":

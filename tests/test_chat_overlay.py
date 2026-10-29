@@ -36,6 +36,18 @@ class ParseTests(unittest.TestCase):
     def test_ignores_other_commands(self) -> None:
         self.assertIsNone(chat_overlay.parse_privmsg(":tmi JOIN #chan", 0.0))
 
+    def test_twitch_emote_positions_are_sorted_and_bounded(self) -> None:
+        line = (
+            "@emotes=25:6-10/1902:0-4,12-16,40-44;room-id=123 "
+            ":a!a@a PRIVMSG #chan :Kappa Keepo Kappa"
+        )
+        message = chat_overlay.parse_privmsg(line, 0.0)
+        self.assertEqual(
+            message.emotes, ((0, 4, "1902"), (6, 10, "25"), (12, 16, "1902"))
+        )
+        self.assertEqual(chat_overlay.room_id(line), "123")
+        self.assertEqual(chat_overlay.room_id(":tmi PRIVMSG #chan :x"), "")
+
 
 class RenderTests(unittest.TestCase):
     def test_escapes_override_tags_and_colors_name(self) -> None:

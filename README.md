@@ -14,10 +14,10 @@ Personal [DMS](https://github.com/dangass/dms) plugins for Hyprland and niri.
 
 ## Twitch Follows setup
 
-Twitch Follows reads the account you are logged in with in Chatterino (Flatpak or native), so it needs no Twitch app registration or separate token. If the Chatterino login expires, the dropdown says so; log in again in Chatterino. Streams play in their own mpv window through streamlink, with the channel's chat drawn in the bottom-left corner (read anonymously over Twitch IRC; press `c` in mpv, or the chat button in the uosc control bar, to hide or show it). `End`, or the live button next to it, jumps back to live after pausing or seeking back. On Hyprland, the play button also opens a separate Chatterino window with only that channel and locks the two into one tab group, stream first. Closing the stream closes its chat tab, and your saved Chatterino layout is not changed.
+Twitch Follows reads the account you are logged in with in Chatterino (Flatpak or native), so it needs no Twitch app registration or separate token. If the Chatterino login expires, the dropdown says so; log in again in Chatterino. Streams play in their own mpv window through streamlink, with the channel's chat drawn in the bottom-left corner, including Twitch, 7TV, BTTV and FFZ emotes when `python-pillow` is installed (read anonymously over Twitch IRC; press `c` in mpv, or the chat button in the uosc control bar, to hide or show it). `End`, or the live button next to it, jumps back to live after pausing or seeking back. On Hyprland, the play button also opens a separate Chatterino window with only that channel and locks the two into one tab group, stream first. Closing the stream closes its chat tab, and your saved Chatterino layout is not changed.
 
 ```bash
-sudo pacman -S streamlink
+sudo pacman -S streamlink python-pillow
 dms ipc call plugin-scan scan
 dms ipc call plugins enable twitchFollows
 ```
