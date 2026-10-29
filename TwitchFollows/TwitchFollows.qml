@@ -10,43 +10,17 @@ PluginComponent {
 
     readonly property string helperPath: Paths.strip(Qt.resolvedUrl("twitch_follows.py"))
     readonly property int refreshSeconds: parseInt(pluginData.refreshSeconds ?? "120") || 120
-    readonly property bool showOffline: pluginData.showOffline ?? true
     readonly property string quality: pluginData.quality || "best"
     readonly property bool chatOverlay: pluginData.chatOverlay ?? true
-    readonly property string volume: pluginData.volume || "25"
+    readonly property string volume: String(pluginData.volume ?? "25")
 
     // Shared by every bar instance (one per screen), so only one fetch runs per interval.
     readonly property var follows: followsVar.value
     readonly property var liveChannels: follows.live ?? []
-    readonly property var offlineChannels: follows.offline ?? []
     readonly property bool hasError: follows.ok === false
     readonly property bool loaded: follows.ok !== undefined
     property bool fetching: false
     readonly property string fetchId: "twitchFollows.list." + Math.random().toString(36).slice(2)
-
-    readonly property var rows: {
-        const result = [];
-        if (liveChannels.length > 0)
-            result.push({
-                "kind": "header",
-                "text": "Live · " + liveChannels.length
-            });
-        for (const channel of liveChannels)
-            result.push(Object.assign({
-                "kind": "live"
-            }, channel));
-        if (showOffline && offlineChannels.length > 0) {
-            result.push({
-                "kind": "header",
-                "text": "Offline · " + offlineChannels.length
-            });
-            for (const channel of offlineChannels)
-                result.push(Object.assign({
-                    "kind": "offline"
-                }, channel));
-        }
-        return result;
-    }
 
     function refresh(force) {
         const age = Date.now() - (follows.fetchedAt ?? 0);
@@ -97,7 +71,7 @@ PluginComponent {
         launch(["--chat", login]);
     }
 
-    popoutWidth: 340
+    popoutWidth: 440
     popoutHeight: 520
     Component.onDestruction: Proc.release(fetchId)
 
@@ -167,6 +141,8 @@ PluginComponent {
                     return root.follows.message;
                 if (!root.loaded)
                     return "Loading followed channels…";
+                if (root.liveChannels.length === 0)
+                    return "Nobody you follow is live right now.";
                 return root.liveChannels.length + " live · logged in as " + root.follows.user;
             }
 
@@ -186,100 +162,81 @@ PluginComponent {
                 height: root.popoutHeight - popout.headerHeight - popout.detailsHeight - Theme.spacingL
                 clip: true
                 spacing: 2
-                model: root.rows
+                model: root.liveChannels
 
-                delegate: Item {
+                delegate: Rectangle {
                     id: row
 
                     required property var modelData
-                    readonly property bool isHeader: modelData.kind === "header"
-                    readonly property bool isLive: modelData.kind === "live"
 
                     width: channelList.width
-                    height: isHeader ? 28 : 40
+                    height: 52
+                    radius: Theme.cornerRadius
+                    color: rowHover.hovered ? Theme.surfaceTextHover : "transparent"
 
-                    StyledText {
-                        visible: row.isHeader
-                        anchors.left: parent.left
-                        anchors.leftMargin: Theme.spacingS
-                        anchors.bottom: parent.bottom
-                        anchors.bottomMargin: Theme.spacingXS
-                        text: row.modelData.text ?? ""
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.weight: Font.Medium
-                        color: Theme.surfaceVariantText
+                    HoverHandler {
+                        id: rowHover
                     }
 
-                    Rectangle {
-                        visible: !row.isHeader
-                        anchors.fill: parent
-                        radius: Theme.cornerRadius
-                        color: rowHover.hovered ? Theme.surfaceTextHover : "transparent"
+                    DCircularImage {
+                        id: avatar
 
-                        HoverHandler {
-                            id: rowHover
+                        width: 38
+                        height: 38
+                        anchors.left: parent.left
+                        anchors.leftMargin: Theme.spacingXS
+                        anchors.verticalCenter: parent.verticalCenter
+                        imageSource: row.modelData.avatar ?? ""
+                        fallbackText: (row.modelData.name ?? "?").charAt(0).toUpperCase()
+                        ringWidth: 2
+                        ringColor: "#eb0400"
+                    }
+
+                    Column {
+                        anchors.left: avatar.right
+                        anchors.leftMargin: Theme.spacingM
+                        anchors.right: actions.left
+                        anchors.rightMargin: Theme.spacingS
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 2
+
+                        StyledText {
+                            width: parent.width
+                            wrapMode: Text.NoWrap
+                            text: row.modelData.name ?? ""
+                            font.pixelSize: Theme.fontSizeLarge
+                            font.weight: Font.Medium
+                            color: Theme.surfaceText
                         }
 
-                        DCircularImage {
-                            id: avatar
+                        StyledText {
+                            visible: text !== ""
+                            width: parent.width
+                            wrapMode: Text.NoWrap
+                            text: row.modelData.title ?? ""
+                            font.pixelSize: Theme.fontSizeMedium - 1
+                            color: Theme.surfaceVariantText
+                        }
+                    }
 
-                            width: 30
-                            height: 30
-                            anchors.left: parent.left
-                            anchors.leftMargin: Theme.spacingXS
-                            anchors.verticalCenter: parent.verticalCenter
-                            imageSource: row.modelData.avatar ?? ""
-                            fallbackText: (row.modelData.name ?? "?").charAt(0).toUpperCase()
-                            ringWidth: row.isLive ? 2 : 0
-                            ringColor: "#eb0400"
-                            opacity: row.isLive ? 1 : 0.5
+                    Row {
+                        id: actions
+
+                        anchors.right: parent.right
+                        anchors.rightMargin: Theme.spacingXS
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Theme.spacingXS
+
+                        DIconButton {
+                            iconName: "play_arrow"
+                            tooltipText: "Watch in mpv"
+                            onClicked: root.watch(row.modelData.login)
                         }
 
-                        Column {
-                            anchors.left: avatar.right
-                            anchors.leftMargin: Theme.spacingS
-                            anchors.right: actions.left
-                            anchors.rightMargin: Theme.spacingS
-                            anchors.verticalCenter: parent.verticalCenter
-
-                            StyledText {
-                                width: parent.width
-                                wrapMode: Text.NoWrap
-                                text: row.modelData.name ?? ""
-                                font.pixelSize: Theme.fontSizeMedium
-                                color: row.isLive ? Theme.surfaceText : Theme.surfaceVariantText
-                            }
-
-                            StyledText {
-                                visible: row.isLive && text !== ""
-                                width: parent.width
-                                wrapMode: Text.NoWrap
-                                text: row.modelData.title ?? ""
-                                font.pixelSize: Theme.fontSizeSmall - 1
-                                color: Theme.surfaceVariantText
-                            }
-                        }
-
-                        Row {
-                            id: actions
-
-                            anchors.right: parent.right
-                            anchors.rightMargin: Theme.spacingXS
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: Theme.spacingXS
-
-                            DIconButton {
-                                visible: row.isLive
-                                iconName: "play_arrow"
-                                tooltipText: "Watch in mpv"
-                                onClicked: root.watch(row.modelData.login)
-                            }
-
-                            DIconButton {
-                                iconName: "chat"
-                                tooltipText: "Open chat in Chatterino"
-                                onClicked: root.openChat(row.modelData.login)
-                            }
+                        DIconButton {
+                            iconName: "chat"
+                            tooltipText: "Open chat in Chatterino"
+                            onClicked: root.openChat(row.modelData.login)
                         }
                     }
                 }

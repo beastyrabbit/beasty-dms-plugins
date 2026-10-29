@@ -51,54 +51,27 @@ class AccountTests(unittest.TestCase):
 
 
 class FetchTests(unittest.TestCase):
-    def test_paginates_and_splits_live_and_offline(self) -> None:
+    def test_paginates_live_streams_and_adds_avatars(self) -> None:
         pages = {
-            ("streams/followed", ""): {
+            "": {
                 "data": [
                     {
                         "user_id": "2",
                         "user_login": "small",
                         "user_name": "Small",
                         "title": "t1",
-                        "game_name": "Chess",
                         "viewer_count": 10,
-                        "started_at": "2026-10-29T10:00:00Z",
                     },
+                ],
+                "pagination": {"cursor": "next"},
+            },
+            "next": {
+                "data": [
                     {
                         "user_id": "1",
                         "user_login": "big",
                         "user_name": "Big",
                         "viewer_count": 5000,
-                    },
-                ],
-                "pagination": {},
-            },
-            ("channels/followed", ""): {
-                "data": [
-                    {
-                        "broadcaster_id": "4",
-                        "broadcaster_login": "zed",
-                        "broadcaster_name": "Zed",
-                    },
-                    {
-                        "broadcaster_id": "1",
-                        "broadcaster_login": "big",
-                        "broadcaster_name": "Big",
-                    },
-                ],
-                "pagination": {"cursor": "next"},
-            },
-            ("channels/followed", "next"): {
-                "data": [
-                    {
-                        "broadcaster_id": "3",
-                        "broadcaster_login": "alpha",
-                        "broadcaster_name": "alpha",
-                    },
-                    {
-                        "broadcaster_id": "2",
-                        "broadcaster_login": "small",
-                        "broadcaster_name": "Small",
                     },
                 ],
                 "pagination": {},
@@ -115,8 +88,9 @@ class FetchTests(unittest.TestCase):
                         for i in params["id"]
                     ]
                 }
+            self.assertEqual(endpoint, "streams/followed")
             self.assertEqual(params["user_id"], "42")
-            return pages[(endpoint, params.get("after", ""))]
+            return pages[params.get("after", "")]
 
         with patch.object(twitch_follows, "helix_get", fake_get):
             result = twitch_follows.fetch_follows(ACCOUNT)
@@ -124,12 +98,11 @@ class FetchTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["user"], "viewer")
         self.assertEqual([c["login"] for c in result["live"]], ["big", "small"])
-        self.assertEqual(result["live"][1]["game"], "Chess")
-        self.assertEqual([c["login"] for c in result["offline"]], ["alpha", "zed"])
+        self.assertEqual(result["live"][1]["title"], "t1")
         self.assertEqual(result["live"][0]["avatar"], "https://cdn/1-70x70.png")
-        self.assertEqual(result["offline"][0]["avatar"], "https://cdn/3-70x70.png")
-        self.assertEqual(calls[-1], ("users", {"id": ["2", "1", "4", "3"]}))
-        self.assertEqual(len(calls), 4)
+        self.assertNotIn("offline", result)
+        self.assertEqual(calls[-1], ("users", {"id": ["2", "1"]}))
+        self.assertEqual(len(calls), 3)
 
     def test_expired_login_has_clear_message(self) -> None:
         error = urllib.error.HTTPError("url", 401, "Unauthorized", {}, None)

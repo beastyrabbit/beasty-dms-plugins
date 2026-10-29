@@ -10,7 +10,7 @@ Personal [DMS](https://github.com/dangass/dms) plugins for Hyprland and niri.
 - **HyprlandWorkspaces** — rainbow Hyprland workspace switcher with named workspaces and scratchpads
 - **CatppuccinWorkspaces** — Catppuccin Mocha workspace indicator for niri (disabled)
 - **Quick AI** — type `?` for quick questions, translation, and input or clipboard summaries
-- **Twitch Follows** — bar count of live followed Twitch channels; the dropdown opens a stream in mpv or its chat in Chatterino
+- **Twitch Follows** — bar count of live followed Twitch channels; the dropdown lists them and opens a stream in mpv or its chat in Chatterino
 
 ## Twitch Follows setup
 
@@ -22,7 +22,7 @@ dms ipc call plugin-scan scan
 dms ipc call plugins enable twitchFollows
 ```
 
-Then add the **Twitch Follows** widget to DankBar. DMS Settings → Plugins → Twitch Follows sets the stream quality, the starting volume (default 25%), the refresh interval (default 2 minutes), whether chat is drawn in the player, and whether offline channels are listed.
+Then add the **Twitch Follows** widget to DankBar. DMS Settings → Plugins → Twitch Follows sets the stream quality, the starting volume (default 25%), the refresh interval (default 2 minutes), and whether chat is drawn in the player.
 
 ## Quick AI setup
 

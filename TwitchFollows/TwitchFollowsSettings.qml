@@ -53,6 +53,9 @@ PluginSettings {
         description: "mpv volume when a stream opens."
         defaultValue: "25"
         options: [{
+            "label": "0% (muted)",
+            "value": "0"
+        }, {
             "label": "10%",
             "value": "10"
         }, {
@@ -91,13 +94,6 @@ PluginSettings {
         settingKey: "chatOverlay"
         label: "Show chat in the player"
         description: "Draw the channel's chat over the stream. Press C in mpv to hide or show it."
-        defaultValue: true
-    }
-
-    ToggleSetting {
-        settingKey: "showOffline"
-        label: "Show offline channels"
-        description: "List offline followed channels below the live ones, with a chat button."
         defaultValue: true
     }
 }

@@ -124,47 +124,18 @@ def fetch_avatars(account: dict[str, str], user_ids: list[str]) -> dict[str, str
 
 
 def fetch_follows(account: dict[str, str]) -> dict[str, Any]:
-    user = {"user_id": account["userID"]}
-    streams = helix_all(account, "streams/followed", user)
-    channels = helix_all(account, "channels/followed", user)
-    user_ids = list(
-        dict.fromkeys(
-            [stream["user_id"] for stream in streams]
-            + [channel["broadcaster_id"] for channel in channels]
-        )
-    )
-    avatars = fetch_avatars(account, user_ids)
+    streams = helix_all(account, "streams/followed", {"user_id": account["userID"]})
+    avatars = fetch_avatars(account, [stream["user_id"] for stream in streams])
     live = [
         {
             "login": stream["user_login"],
             "name": stream.get("user_name") or stream["user_login"],
             "avatar": avatars.get(stream["user_id"], ""),
             "title": stream.get("title", ""),
-            "game": stream.get("game_name", ""),
-            "viewers": stream.get("viewer_count", 0),
-            "startedAt": stream.get("started_at", ""),
         }
         for stream in sorted(streams, key=lambda s: -s.get("viewer_count", 0))
     ]
-    live_logins = {channel["login"] for channel in live}
-    offline = sorted(
-        (
-            {
-                "login": channel["broadcaster_login"],
-                "name": channel.get("broadcaster_name") or channel["broadcaster_login"],
-                "avatar": avatars.get(channel["broadcaster_id"], ""),
-            }
-            for channel in channels
-            if channel["broadcaster_login"] not in live_logins
-        ),
-        key=lambda channel: channel["name"].lower(),
-    )
-    return {
-        "ok": True,
-        "user": account.get("username", ""),
-        "live": live,
-        "offline": offline,
-    }
+    return {"ok": True, "user": account.get("username", ""), "live": live}
 
 
 def chatterino_command() -> list[str] | None:
