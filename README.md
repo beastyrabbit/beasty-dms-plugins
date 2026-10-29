@@ -10,6 +10,19 @@ Personal [DMS](https://github.com/dangass/dms) plugins for Hyprland and niri.
 - **HyprlandWorkspaces** — rainbow Hyprland workspace switcher with named workspaces and scratchpads
 - **CatppuccinWorkspaces** — Catppuccin Mocha workspace indicator for niri (disabled)
 - **Quick AI** — type `?` for quick questions, translation, and input or clipboard summaries
+- **Twitch Follows** — bar count of live followed Twitch channels; the dropdown opens a stream in mpv or its chat in Chatterino
+
+## Twitch Follows setup
+
+Twitch Follows reads the account you are logged in with in Chatterino (Flatpak or native), so it needs no Twitch app registration or separate token. If the Chatterino login expires, the dropdown says so; log in again in Chatterino. Streams play in their own mpv window through streamlink, and the chat button opens the channel as a tab in Chatterino.
+
+```bash
+sudo pacman -S streamlink
+dms ipc call plugin-scan scan
+dms ipc call plugins enable twitchFollows
+```
+
+Then add the **Twitch Follows** widget to DankBar. DMS Settings → Plugins → Twitch Follows sets the stream quality, the refresh interval (default 2 minutes), and whether offline channels are listed.
 
 ## Quick AI setup
 

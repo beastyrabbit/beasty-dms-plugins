@@ -29,10 +29,10 @@ pre-commit:
     python-quality:
       glob: "*.py"
       run: |
-        ruff check QuickAI scripts tests
-        ruff format --check QuickAI scripts tests
+        ruff check QuickAI TwitchFollows scripts tests
+        ruff format --check QuickAI TwitchFollows scripts tests
         python3 -m unittest discover -s tests -v
-      fail_text: "Quick AI tests failed"
+      fail_text: "Python checks failed"
 
 pre-push:
   commands:
