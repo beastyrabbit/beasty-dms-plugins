@@ -56,6 +56,7 @@ class FetchTests(unittest.TestCase):
             ("streams/followed", ""): {
                 "data": [
                     {
+                        "user_id": "2",
                         "user_login": "small",
                         "user_name": "Small",
                         "title": "t1",
@@ -63,21 +64,42 @@ class FetchTests(unittest.TestCase):
                         "viewer_count": 10,
                         "started_at": "2026-10-29T10:00:00Z",
                     },
-                    {"user_login": "big", "user_name": "Big", "viewer_count": 5000},
+                    {
+                        "user_id": "1",
+                        "user_login": "big",
+                        "user_name": "Big",
+                        "viewer_count": 5000,
+                    },
                 ],
                 "pagination": {},
             },
             ("channels/followed", ""): {
                 "data": [
-                    {"broadcaster_login": "zed", "broadcaster_name": "Zed"},
-                    {"broadcaster_login": "big", "broadcaster_name": "Big"},
+                    {
+                        "broadcaster_id": "4",
+                        "broadcaster_login": "zed",
+                        "broadcaster_name": "Zed",
+                    },
+                    {
+                        "broadcaster_id": "1",
+                        "broadcaster_login": "big",
+                        "broadcaster_name": "Big",
+                    },
                 ],
                 "pagination": {"cursor": "next"},
             },
             ("channels/followed", "next"): {
                 "data": [
-                    {"broadcaster_login": "alpha", "broadcaster_name": "alpha"},
-                    {"broadcaster_login": "small", "broadcaster_name": "Small"},
+                    {
+                        "broadcaster_id": "3",
+                        "broadcaster_login": "alpha",
+                        "broadcaster_name": "alpha",
+                    },
+                    {
+                        "broadcaster_id": "2",
+                        "broadcaster_login": "small",
+                        "broadcaster_name": "Small",
+                    },
                 ],
                 "pagination": {},
             },
@@ -86,6 +108,13 @@ class FetchTests(unittest.TestCase):
 
         def fake_get(account, endpoint, params):
             calls.append((endpoint, params))
+            if endpoint == "users":
+                return {
+                    "data": [
+                        {"id": i, "profile_image_url": f"https://cdn/{i}-300x300.png"}
+                        for i in params["id"]
+                    ]
+                }
             self.assertEqual(params["user_id"], "42")
             return pages[(endpoint, params.get("after", ""))]
 
@@ -97,7 +126,10 @@ class FetchTests(unittest.TestCase):
         self.assertEqual([c["login"] for c in result["live"]], ["big", "small"])
         self.assertEqual(result["live"][1]["game"], "Chess")
         self.assertEqual([c["login"] for c in result["offline"]], ["alpha", "zed"])
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(result["live"][0]["avatar"], "https://cdn/1-70x70.png")
+        self.assertEqual(result["offline"][0]["avatar"], "https://cdn/3-70x70.png")
+        self.assertEqual(calls[-1], ("users", {"id": ["2", "1", "4", "3"]}))
+        self.assertEqual(len(calls), 4)
 
     def test_expired_login_has_clear_message(self) -> None:
         error = urllib.error.HTTPError("url", 401, "Unauthorized", {}, None)

@@ -64,9 +64,9 @@ def load_account(paths: list[Path] | None = None) -> dict[str, str]:
 
 
 def helix_get(
-    account: dict[str, str], endpoint: str, params: dict[str, str]
+    account: dict[str, str], endpoint: str, params: dict[str, Any]
 ) -> dict[str, Any]:
-    url = f"{HELIX_URL}/{endpoint}?{urllib.parse.urlencode(params)}"
+    url = f"{HELIX_URL}/{endpoint}?{urllib.parse.urlencode(params, doseq=True)}"
     request = urllib.request.Request(
         url,
         headers={
@@ -104,14 +104,33 @@ def helix_all(
     return items
 
 
+def fetch_avatars(account: dict[str, str], user_ids: list[str]) -> dict[str, str]:
+    avatars: dict[str, str] = {}
+    for start in range(0, len(user_ids), 100):
+        reply = helix_get(account, "users", {"id": user_ids[start : start + 100]})
+        for user in reply.get("data", []):
+            # The 70x70 variant is plenty for a list row and much smaller to load.
+            url = user.get("profile_image_url", "")
+            avatars[user["id"]] = url.replace("-300x300.", "-70x70.")
+    return avatars
+
+
 def fetch_follows(account: dict[str, str]) -> dict[str, Any]:
     user = {"user_id": account["userID"]}
     streams = helix_all(account, "streams/followed", user)
     channels = helix_all(account, "channels/followed", user)
+    user_ids = list(
+        dict.fromkeys(
+            [stream["user_id"] for stream in streams]
+            + [channel["broadcaster_id"] for channel in channels]
+        )
+    )
+    avatars = fetch_avatars(account, user_ids)
     live = [
         {
             "login": stream["user_login"],
             "name": stream.get("user_name") or stream["user_login"],
+            "avatar": avatars.get(stream["user_id"], ""),
             "title": stream.get("title", ""),
             "game": stream.get("game_name", ""),
             "viewers": stream.get("viewer_count", 0),
@@ -125,6 +144,7 @@ def fetch_follows(account: dict[str, str]) -> dict[str, Any]:
             {
                 "login": channel["broadcaster_login"],
                 "name": channel.get("broadcaster_name") or channel["broadcaster_login"],
+                "avatar": avatars.get(channel["broadcaster_id"], ""),
             }
             for channel in channels
             if channel["broadcaster_login"] not in live_logins

@@ -86,20 +86,7 @@ PluginComponent {
         Quickshell.execDetached(["python3", helperPath, "--chat", login]);
     }
 
-    function formatViewers(count) {
-        if (count >= 1000)
-            return (count / 1000).toFixed(count >= 10000 ? 0 : 1) + "k";
-        return String(count);
-    }
-
-    function formatUptime(startedAt) {
-        if (!startedAt)
-            return "";
-        const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 60000));
-        return minutes >= 60 ? Math.floor(minutes / 60) + "h " + (minutes % 60) + "m" : minutes + "m";
-    }
-
-    popoutWidth: 420
+    popoutWidth: 340
     popoutHeight: 520
     Component.onDestruction: Proc.release(fetchId)
 
@@ -198,7 +185,7 @@ PluginComponent {
                     readonly property bool isLive: modelData.kind === "live"
 
                     width: channelList.width
-                    height: isHeader ? 30 : (isLive ? 56 : 40)
+                    height: isHeader ? 28 : 40
 
                     StyledText {
                         visible: row.isHeader
@@ -222,45 +209,42 @@ PluginComponent {
                             id: rowHover
                         }
 
-                        Rectangle {
-                            id: liveDot
+                        DCircularImage {
+                            id: avatar
 
-                            width: 8
-                            height: 8
-                            radius: 4
+                            width: 30
+                            height: 30
                             anchors.left: parent.left
-                            anchors.leftMargin: Theme.spacingS
+                            anchors.leftMargin: Theme.spacingXS
                             anchors.verticalCenter: parent.verticalCenter
-                            color: row.isLive ? "#eb0400" : Theme.outlineVariant
+                            imageSource: row.modelData.avatar ?? ""
+                            fallbackText: (row.modelData.name ?? "?").charAt(0).toUpperCase()
+                            ringWidth: row.isLive ? 2 : 0
+                            ringColor: "#eb0400"
+                            opacity: row.isLive ? 1 : 0.5
                         }
 
                         Column {
-                            anchors.left: liveDot.right
+                            anchors.left: avatar.right
                             anchors.leftMargin: Theme.spacingS
                             anchors.right: actions.left
                             anchors.rightMargin: Theme.spacingS
                             anchors.verticalCenter: parent.verticalCenter
-                            spacing: 2
 
                             StyledText {
                                 width: parent.width
-                                elide: Text.ElideRight
-                                text: {
-                                    if (!row.isLive)
-                                        return row.modelData.name ?? "";
-                                    const extra = [row.modelData.game, root.formatViewers(row.modelData.viewers), root.formatUptime(row.modelData.startedAt)];
-                                    return row.modelData.name + "  ·  " + extra.filter(part => part).join(" · ");
-                                }
+                                wrapMode: Text.NoWrap
+                                text: row.modelData.name ?? ""
                                 font.pixelSize: Theme.fontSizeMedium
                                 color: row.isLive ? Theme.surfaceText : Theme.surfaceVariantText
                             }
 
                             StyledText {
-                                visible: row.isLive
+                                visible: row.isLive && text !== ""
                                 width: parent.width
-                                elide: Text.ElideRight
+                                wrapMode: Text.NoWrap
                                 text: row.modelData.title ?? ""
-                                font.pixelSize: Theme.fontSizeSmall
+                                font.pixelSize: Theme.fontSizeSmall - 1
                                 color: Theme.surfaceVariantText
                             }
                         }
