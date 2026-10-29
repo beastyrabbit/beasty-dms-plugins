@@ -22,9 +22,9 @@ PluginComponent {
     readonly property var apps: [
         { appId: "discord", label: "Discord" },
         { appId: "brave-hnpfjngllnobngcgfapefoaidbinmjnm-Default", label: "WhatsApp" },
-        { appId: "Fastmail", label: "Fastmail" },
+        { appId: "com.fastmail.Fastmail", label: "Fastmail" },
         { appId: "steam", label: "Steam" },
-        { appId: "1password", label: "1Password" }
+        { appId: "com.onepassword.OnePassword", label: "1Password" }
     ]
 
     // Back button state
