@@ -29,6 +29,42 @@ HELIX_URL = "https://api.twitch.tv/helix"
 REQUEST_TIMEOUT_SECONDS = 10
 MAX_PAGES = 20
 CHATTERINO_FLATPAK_ID = "com.chatterino.chatterino"
+CHATTERINO_CLASSES = {CHATTERINO_FLATPAK_ID, "chatterino"}
+CHAT_WINDOW_WAIT_SECONDS = 20
+ADDRESS_PATTERN = re.compile(r"^0x[0-9a-f]+$")
+# Puts the stream window (STREAM) and its Chatterino window (CHAT) into one
+# locked Hyprland tab group with the stream as the shown tab. Hyprland may
+# already have auto-grouped either window into whatever unlocked group was
+# focused, so each first leaves any group that holds other windows.
+GROUP_LUA = """
+local S, C = "STREAM", "CHAT"
+local function sel(a) return "address:" .. a end
+local function index_of(group, a)
+  for i, m in ipairs(group and group.members or {}) do
+    if m.address == a then return i end
+  end
+end
+for _, a in ipairs({ S, C }) do
+  local w = hl.get_window(sel(a))
+  if not w then return "missing" end
+  for _, m in ipairs(w.group and w.group.members or {}) do
+    if m.address ~= S and m.address ~= C then w.group:remove(w) break end
+  end
+end
+if not hl.get_window(sel(S)).group then
+  hl.dispatch(hl.dsp.group.toggle({ window = sel(S) }))
+end
+local stream, chat = hl.get_window(sel(S)), hl.get_window(sel(C))
+if not index_of(stream.group, C) then
+  if chat.group then chat.group:remove(chat) end
+  stream.group:add(chat)
+end
+stream = hl.get_window(sel(S))
+hl.dispatch(hl.dsp.group.active({ index = index_of(stream.group, S), window = sel(S) }))
+hl.dispatch(hl.dsp.focus({ window = sel(S) }))
+hl.dispatch(hl.dsp.group.lock_active({ action = "lock" }))
+return "ok"
+"""
 DEFAULT_VOLUME = 25
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,25}$")
 QUALITY_PATTERN = re.compile(r"^[A-Za-z0-9_,+-]{1,40}$")
@@ -201,24 +237,78 @@ def file_lock(name: str, blocking: bool) -> Iterator[bool]:
         yield True
 
 
-def open_chat(login: str) -> int:
+def hypr_clients(hyprctl: str) -> list[dict[str, Any]]:
+    result = subprocess.run(
+        [hyprctl, "clients", "-j"], capture_output=True, text=True, check=False
+    )
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+
+
+def chatterino_windows(clients: list[dict[str, Any]]) -> set[str]:
+    return {c["address"] for c in clients if c.get("class") in CHATTERINO_CLASSES}
+
+
+def open_chat_tab(
+    login: str, viewer: subprocess.Popen
+) -> tuple[subprocess.Popen, str] | None:
+    """Open Chatterino for the channel and tab it behind the stream window.
+
+    Returns the Chatterino process and its window address ("" when it could
+    not be grouped), or None when Chatterino is not installed.
+    """
     command = chatterino_command()
     if not command:
-        notify("Chatterino is not installed", "Install Chatterino to open chat.")
-        return 1
-    # -c starts a separate Chatterino with only this channel and without saving
-    # its layout; --activate would add a tab to the saved main window instead.
-    # The lock is held while the window is open so a second click is ignored.
-    with file_lock(f"twitch-follows-chat-{login}.lock", blocking=False) as acquired:
-        if not acquired:
-            return 0
-        return subprocess.run(
+        return None
+    hyprctl = shutil.which("hyprctl")
+    # One launch at a time, so a new Chatterino window can't be taken for
+    # another channel's.
+    with file_lock("twitch-follows-chat-launch.lock", blocking=True):
+        before = chatterino_windows(hypr_clients(hyprctl)) if hyprctl else set()
+        # -c starts a separate Chatterino with only this channel and without
+        # saving its layout.
+        chat = subprocess.Popen(
             [*command, "-c", f"t:{login}"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            check=False,
-        ).returncode
+        )
+        if not hyprctl:
+            return chat, ""
+        deadline = time.monotonic() + CHAT_WINDOW_WAIT_SECONDS
+        stream_window = chat_window = ""
+        while viewer.poll() is None and chat.poll() is None:
+            clients = hypr_clients(hyprctl)
+            stream_window = next(
+                (c["address"] for c in clients if c.get("pid") == viewer.pid), ""
+            )
+            chat_window = min(chatterino_windows(clients) - before, default="")
+            if (stream_window and chat_window) or time.monotonic() > deadline:
+                break
+            time.sleep(0.1)
+    if not (
+        ADDRESS_PATTERN.match(stream_window) and ADDRESS_PATTERN.match(chat_window)
+    ):
+        return chat, ""
+    lua = GROUP_LUA.replace("STREAM", stream_window).replace("CHAT", chat_window)
+    subprocess.run([hyprctl, "repl", lua], capture_output=True, check=False)
+    return chat, chat_window
+
+
+def close_chat_tab(chat: subprocess.Popen, window: str) -> None:
+    hyprctl = shutil.which("hyprctl")
+    if window and hyprctl:
+        close = f'hl.dispatch(hl.dsp.window.close({{ window = "address:{window}" }}))'
+        subprocess.run([hyprctl, "repl", close], capture_output=True, check=False)
+    else:
+        chat.terminate()
+    try:
+        chat.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        chat.terminate()
+        chat.wait()
 
 
 def watch(
@@ -281,6 +371,7 @@ def play(
     # streamlink's log goes to a file: a pipe nobody reads could fill up and
     # stall a long stream.
     log_path = runtime_path(f"twitch-follows-{login}.log")
+    chat_tab = None
     try:
         with open(log_path, "w") as log:
             source = subprocess.Popen(
@@ -303,6 +394,7 @@ def play(
             )
             assert source.stdout is not None
             source.stdout.close()
+            chat_tab = open_chat_tab(login, viewer)
             # Whichever exits first decides: mpv closed by the user is normal,
             # streamlink ending first means the stream failed or ended.
             while viewer.poll() is None and source.poll() is None:
@@ -319,6 +411,9 @@ def play(
                 source_ended_first or viewer.returncode != 0
             )
     finally:
+        # The chat tab belongs to the stream: closing the stream closes it.
+        if chat_tab:
+            close_chat_tab(*chat_tab)
         overlay.terminate()
         overlay.wait()
         ipc_path.unlink(missing_ok=True)
@@ -336,9 +431,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--list", action="store_true", help="print followed channels as JSON"
     )
     group.add_argument(
-        "--watch", metavar="LOGIN", help="play a channel with streamlink and mpv"
+        "--watch",
+        metavar="LOGIN",
+        help="play a channel in mpv, tabbed with its chat in Chatterino",
     )
-    group.add_argument("--chat", metavar="LOGIN", help="open a channel in Chatterino")
     parser.add_argument(
         "--quality", default="best", help="streamlink quality for --watch"
     )
@@ -368,12 +464,10 @@ def main(argv: list[str] | None = None) -> int:
             result = {"ok": False, "message": str(error)}
         print(json.dumps(result))
         return 0
-    login = args.watch or args.chat
+    login = args.watch
     if not LOGIN_PATTERN.match(login):
         print(f"Invalid channel name: {login!r}", file=sys.stderr)
         return 2
-    if args.chat:
-        return open_chat(login.lower())
     quality = args.quality if QUALITY_PATTERN.match(args.quality) else "best"
     volume = min(max(args.volume, 0), 100)
     return watch(

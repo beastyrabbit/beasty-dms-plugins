@@ -36,6 +36,18 @@ class ParseTests(unittest.TestCase):
     def test_ignores_other_commands(self) -> None:
         self.assertIsNone(chat_overlay.parse_privmsg(":tmi JOIN #chan", 0.0))
 
+    def test_twitch_emote_positions_are_sorted_and_bounded(self) -> None:
+        line = (
+            "@emotes=25:6-10/1902:0-4,12-16,40-44;room-id=123 "
+            ":a!a@a PRIVMSG #chan :Kappa Keepo Kappa"
+        )
+        message = chat_overlay.parse_privmsg(line, 0.0)
+        self.assertEqual(
+            message.emotes, ((0, 4, "1902"), (6, 10, "25"), (12, 16, "1902"))
+        )
+        self.assertEqual(chat_overlay.room_id(line), "123")
+        self.assertEqual(chat_overlay.room_id(":tmi PRIVMSG #chan :x"), "")
+
 
 class RenderTests(unittest.TestCase):
     def test_escapes_override_tags_and_colors_name(self) -> None:
@@ -58,6 +70,70 @@ class RenderTests(unittest.TestCase):
 
     def test_empty_when_nothing_recent(self) -> None:
         self.assertEqual(chat_overlay.render([], 0.0), "")
+
+
+@unittest.skipUnless(importlib.util.find_spec("PIL"), "needs Pillow")
+class ImageLayoutTests(unittest.TestCase):
+    def test_narrower_window_rewraps_cached_lines(self) -> None:
+        chat_image, emotes = self.modules()
+        renderer = chat_image.ChatRenderer(
+            emotes.EmoteCatalog(lambda: None), emotes.EmoteImages(lambda: None)
+        )
+        message = chat_overlay.ChatMessage(
+            "Ann", "#FF8000", "a fairly long chat message " * 3, False, 0.0
+        )
+        wide = renderer.layout([message], 1280, 720)
+        narrow = renderer.layout([message], 300, 720)
+        self.assertLessEqual(narrow.width, 300)
+        self.assertGreater(narrow.height, wide.height)
+
+    def test_long_emoji_run_wraps_inside_the_panel(self) -> None:
+        chat_image, emotes = self.modules()
+        renderer = chat_image.ChatRenderer(
+            emotes.EmoteCatalog(lambda: None), emotes.EmoteImages(lambda: None)
+        )
+        message = chat_overlay.ChatMessage("Ann", "#FF8000", "😀" * 40, False, 0.0)
+        panel = renderer.layout([message], 300, 720)
+        self.assertLessEqual(panel.width, 300)
+
+    def test_zero_width_emote_stays_on_top_of_animated_one(self) -> None:
+        chat_image, emotes = self.modules()
+        from PIL import Image
+
+        red, blue = (255, 0, 0, 255), (0, 0, 255, 255)
+        frames = [Image.new("RGBA", (10, 10), red) for _ in range(2)]
+        images = {
+            "base": emotes.EmoteImage(frames, [100, 100]),
+            "zw": emotes.EmoteImage([Image.new("RGBA", (10, 10), blue)], [100]),
+        }
+        catalog = {
+            "BASE": emotes.Emote("BASE", "base"),
+            "ZW": emotes.Emote("ZW", "zw", zero_width=True),
+        }
+
+        class Catalog:
+            def lookup(self, word):
+                return catalog.get(word)
+
+        class Images:
+            def get(self, url):
+                return images[url]
+
+        renderer = chat_image.ChatRenderer(Catalog(), Images())
+        message = chat_overlay.ChatMessage("A", "#FFFFFF", "BASE ZW", False, 0.0)
+        panel = renderer.layout([message], 1280, 720)
+        top, line = panel.lines[-1]
+        x, y, _, height = line.animated[-1]
+        pixel = panel.draw(0).getpixel((x + height // 2, top + y + height // 2))
+        self.assertEqual(pixel, blue)
+
+    def modules(self):
+        sys.path.insert(0, str(MODULE_PATH.parent))
+        self.addCleanup(sys.path.remove, str(MODULE_PATH.parent))
+        import chat_image
+        import emotes
+
+        return chat_image, emotes
 
 
 if __name__ == "__main__":

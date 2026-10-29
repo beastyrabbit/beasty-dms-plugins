@@ -151,7 +151,9 @@ class LaunchTests(unittest.TestCase):
         env = patch.dict(twitch_follows.os.environ, {"XDG_RUNTIME_DIR": runtime.name})
         env.start()
         self.addCleanup(env.stop)
-        self.completed = twitch_follows.subprocess.CompletedProcess([], 0, "", "")
+        no_chat = patch.object(twitch_follows, "chatterino_command", return_value=None)
+        no_chat.start()
+        self.addCleanup(no_chat.stop)
 
     def test_rejects_invalid_channel_names(self) -> None:
         with patch.object(twitch_follows.subprocess, "run") as run:
@@ -264,28 +266,53 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(twitch_follows.main(["--watch", "big"]), 0)
         popen.assert_not_called()
 
-    def test_chat_opens_separate_chatterino_with_only_that_channel(self) -> None:
-        with (
-            patch.object(
-                twitch_follows, "chatterino_command", return_value=["chatterino"]
-            ),
-            patch.object(
-                twitch_follows.subprocess, "run", return_value=self.completed
-            ) as run,
+    def test_watch_tabs_chatterino_behind_the_stream_and_closes_it_after(
+        self,
+    ) -> None:
+        bin_dir = self.fake_tools(
+            "printf video", f'echo $$ > "{self.runtime}/mpv.pid"; sleep 1; cat'
+        )
+        chat = bin_dir / "chatterino"
+        chat.write_text(
+            f'#!/bin/sh\necho "$@" > "{bin_dir}/chatterino.args"\n'
+            f'echo $$ > "{bin_dir}/chat.pid"\ntrap "exit 0" TERM\nsleep 5 & wait\n'
+        )
+        chat.chmod(0o755)
+        # A fake hyprctl: lists an older Chatterino window, the mpv window by
+        # its pid, and the new Chatterino window once it started; records Lua.
+        hyprctl = bin_dir / "hyprctl"
+        hyprctl.write_text(
+            f"""#!{sys.executable}
+import json, os, signal, sys
+d = {str(bin_dir)!r}
+if sys.argv[1] == "repl":
+    open(os.path.join(d, "repl"), "a").write(sys.argv[2] + "\\n----\\n")
+    if "window.close" in sys.argv[2]:
+        os.kill(int(open(os.path.join(d, "chat.pid")).read()), signal.SIGTERM)
+    sys.exit(0)
+clients = [{{"address": "0xdead", "class": "com.chatterino.chatterino", "pid": 2}}]
+mpv_pid = os.path.join({self.runtime!r}, "mpv.pid")
+if os.path.exists(mpv_pid):
+    pid = int(open(mpv_pid).read())
+    clients.append({{"address": "0xa1", "class": "mpv", "pid": pid}})
+if os.path.exists(os.path.join(d, "chat.pid")):
+    clients.append({{"address": "0xb2", "class": "chatterino", "pid": 3}})
+print(json.dumps(clients))
+"""
+        )
+        hyprctl.chmod(0o755)
+        with patch.object(
+            twitch_follows, "chatterino_command", return_value=[str(chat)]
         ):
-            self.assertEqual(twitch_follows.main(["--chat", "big"]), 0)
-        self.assertEqual(run.call_args.args[0], ["chatterino", "-c", "t:big"])
-
-    def test_second_chat_for_same_channel_is_ignored(self) -> None:
-        with (
-            patch.object(
-                twitch_follows, "chatterino_command", return_value=["chatterino"]
-            ),
-            patch.object(twitch_follows.subprocess, "run") as run,
-            twitch_follows.file_lock("twitch-follows-chat-big.lock", blocking=False),
-        ):
-            self.assertEqual(twitch_follows.main(["--chat", "big"]), 0)
-        run.assert_not_called()
+            code = twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            (bin_dir / "chatterino.args").read_text().split(), ["-c", "t:big"]
+        )
+        group, close = (bin_dir / "repl").read_text().split("\n----\n")[:2]
+        self.assertIn('local S, C = "0xa1", "0xb2"', group)
+        self.assertIn("lock_active", group)
+        self.assertIn('window = "address:0xb2"', close)
 
 
 if __name__ == "__main__":
