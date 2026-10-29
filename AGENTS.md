@@ -1,5 +1,7 @@
 # Project Agent Guidelines
 
+Project knowledge lives in memex: project page `pages/projects/beasty-dms-plugins.md`.
+
 ## DMS Plugin Deployment
 
 - `plugins.json` is the source of truth for locally deployed plugins.
