@@ -3,7 +3,7 @@
 
 Reads chat anonymously over Twitch IRC and renders the latest messages
 through mpv's JSON IPC as an OSD overlay. Press `c` in mpv, or the uosc chat
-button, to hide or show it. Exits when mpv closes.
+button, to hide or show it; `End` jumps back to live. Exits when mpv closes.
 """
 
 from __future__ import annotations
@@ -32,6 +32,12 @@ MARKER_PROPERTY = "user-data/twitch-chat"
 # "yes" or "no"; the uosc chat button sets it, and the `c` key asks us to flip it.
 VISIBLE_PROPERTY = "user-data/twitch-chat-visible"
 TOGGLE_MESSAGE = "twitch-chat-toggle"
+# `End` (and a uosc button) jump back to the live edge, mirroring mpv's `Home`.
+LIVE_KEY = "END"
+LIVE_MESSAGE = "twitch-go-live"
+LIVE_REQUEST_ID = 42
+# Stay this far behind the newest buffered frame so playback doesn't stall.
+LIVE_MARGIN_SECONDS = 1.5
 # Twitch's palette for users who never picked a name color.
 DEFAULT_COLORS = (
     "#FF0000",
@@ -194,8 +200,11 @@ class Mpv:
         self.sock.connect(path)
         self.buffer = b""
 
-    def send(self, command: list | dict) -> None:
-        self.sock.sendall(json.dumps({"command": command}).encode() + b"\n")
+    def send(self, command: list | dict, request_id: int | None = None) -> None:
+        message: dict = {"command": command}
+        if request_id is not None:
+            message["request_id"] = request_id
+        self.sock.sendall(json.dumps(message).encode() + b"\n")
 
     def show(self, data: str, hidden: bool) -> None:
         self.send(
@@ -250,6 +259,7 @@ def run(channel: str, ipc_path: str) -> int:
     mpv.send(["set_property", MARKER_PROPERTY, True])
     mpv.send(["observe_property", 1, VISIBLE_PROPERTY])
     mpv.send(["keybind", TOGGLE_KEY, f"script-message {TOGGLE_MESSAGE}"])
+    mpv.send(["keybind", LIVE_KEY, f"script-message {LIVE_MESSAGE}"])
     # Twitch pre-roll ads can hold back the video for half a minute.
     mpv.send(["show-text", f"Loading {channel}…", 60000])
     loading = True
@@ -258,6 +268,16 @@ def run(channel: str, ipc_path: str) -> int:
     try:
         while True:
             for event in mpv.events(timeout=1.0):
+                if event.get("event") == "client-message" and event.get("args") == [
+                    LIVE_MESSAGE
+                ]:
+                    mpv.send(["get_property", "demuxer-cache-time"], LIVE_REQUEST_ID)
+                if event.get("request_id") == LIVE_REQUEST_ID and isinstance(
+                    event.get("data"), (int, float)
+                ):
+                    target = max(0.0, event["data"] - LIVE_MARGIN_SECONDS)
+                    mpv.send(["seek", target, "absolute"])
+                    mpv.send(["show-text", "Live"])
                 if event.get("event") == "client-message" and event.get("args") == [
                     TOGGLE_MESSAGE
                 ]:
