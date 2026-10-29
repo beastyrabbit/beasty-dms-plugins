@@ -68,10 +68,6 @@ PluginComponent {
         launch(args);
     }
 
-    function openChat(login) {
-        launch(["--chat", login]);
-    }
-
     popoutWidth: 440
     popoutHeight: 520
     Component.onDestruction: Proc.release(fetchId)
@@ -230,19 +226,13 @@ PluginComponent {
 
                         DIconButton {
                             iconName: "play_arrow"
-                            tooltipText: "Watch in mpv (right-click: muted)"
+                            tooltipText: "Watch with chat (right-click: muted)"
                             onClicked: root.watch(row.modelData, false)
 
                             TapHandler {
                                 acceptedButtons: Qt.RightButton
                                 onTapped: root.watch(row.modelData, true)
                             }
-                        }
-
-                        DIconButton {
-                            iconName: "chat"
-                            tooltipText: "Open chat in Chatterino"
-                            onClicked: root.openChat(row.modelData.login)
                         }
                     }
                 }
