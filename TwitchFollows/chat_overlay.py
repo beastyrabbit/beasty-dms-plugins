@@ -2,8 +2,8 @@
 """Draw a channel's Twitch chat on top of an mpv window.
 
 Reads chat anonymously over Twitch IRC and renders the latest messages
-through mpv's JSON IPC as an OSD overlay. Press `c` in mpv to hide or show it.
-Exits when mpv closes.
+through mpv's JSON IPC as an OSD overlay. Press `c` in mpv, or the uosc chat
+button, to hide or show it. Exits when mpv closes.
 """
 
 from __future__ import annotations
@@ -27,6 +27,10 @@ MAX_LINES = 14
 MAX_AGE_SECONDS = 120
 WRAP_WIDTH = 48
 TOGGLE_KEY = "c"
+# Marks a Twitch window, so uosc can show its chat button only there.
+MARKER_PROPERTY = "user-data/twitch-chat"
+# "yes" or "no"; the uosc chat button sets it, and the `c` key asks us to flip it.
+VISIBLE_PROPERTY = "user-data/twitch-chat-visible"
 TOGGLE_MESSAGE = "twitch-chat-toggle"
 # Twitch's palette for users who never picked a name color.
 DEFAULT_COLORS = (
@@ -242,6 +246,9 @@ def run(channel: str, ipc_path: str) -> int:
         return 1
     feed = ChatFeed(channel)
     threading.Thread(target=feed.run_forever, daemon=True).start()
+    mpv.send(["set_property", VISIBLE_PROPERTY, "yes"])
+    mpv.send(["set_property", MARKER_PROPERTY, True])
+    mpv.send(["observe_property", 1, VISIBLE_PROPERTY])
     mpv.send(["keybind", TOGGLE_KEY, f"script-message {TOGGLE_MESSAGE}"])
     # Twitch pre-roll ads can hold back the video for half a minute.
     mpv.send(["show-text", f"Loading {channel}…", 60000])
@@ -251,12 +258,20 @@ def run(channel: str, ipc_path: str) -> int:
     try:
         while True:
             for event in mpv.events(timeout=1.0):
-                if loading and event.get("event") == "playback-restart":
-                    loading = False
-                    mpv.send(["show-text", "", 1])
                 if event.get("event") == "client-message" and event.get("args") == [
                     TOGGLE_MESSAGE
                 ]:
+                    mpv.send(
+                        ["set_property", VISIBLE_PROPERTY, "yes" if hidden else "no"]
+                    )
+                if loading and event.get("event") == "playback-restart":
+                    loading = False
+                    mpv.send(["show-text", "", 1])
+                if (
+                    event.get("event") == "property-change"
+                    and event.get("name") == VISIBLE_PROPERTY
+                    and (event.get("data") == "no") != hidden
+                ):
                     hidden = not hidden
                     mpv.send(["show-text", "Chat hidden" if hidden else "Chat shown"])
                     last_draw = 0.0
