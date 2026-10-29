@@ -392,8 +392,10 @@ class Overlay:
         if self.loading and kind == "playback-restart":
             self.loading = False
             self.mpv.send(["show-text", "", 1])
-        if kind != "property-change":
-            return
+        if kind == "property-change":
+            self.property_changed(event)
+
+    def property_changed(self, event: dict) -> None:
         if (
             event.get("name") == VISIBLE_PROPERTY
             and (event.get("data") == "no") != self.hidden

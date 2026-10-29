@@ -30,6 +30,27 @@ WHITE = (255, 255, 255, 255)
 BLACK = (0, 0, 0, 255)
 # Joiners and modifiers belong to the character before them.
 COMBINING = re.compile("[‍︎️⃣\U0001f3fb-\U0001f3ff\U000e0020-\U000e007f]")
+REGIONAL_INDICATOR = re.compile("[\U0001f1e6-\U0001f1ff]")
+
+
+def graphemes(text: str) -> list[str]:
+    """Split emoji text into what shows as single pictures (enough for emoji)."""
+    clusters: list[str] = []
+    for char in text:
+        joins = clusters and (
+            COMBINING.match(char)
+            or clusters[-1].endswith("\u200d")
+            or (
+                len(clusters[-1]) == 1
+                and REGIONAL_INDICATOR.match(clusters[-1])
+                and REGIONAL_INDICATOR.match(char)
+            )
+        )
+        if joins:
+            clusters[-1] += char
+        else:
+            clusters.append(char)
+    return clusters
 
 
 def hex_rgba(hex_color: str) -> tuple[int, int, int, int]:
@@ -74,6 +95,11 @@ def has_glyph(path: str, char: str) -> bool:
 
 @functools.cache
 def fallback_file(char: str) -> str:
+    # Prefer the color emoji font; plain fontconfig fallback often picks a
+    # black-and-white emoji glyph from a text font such as DejaVu Sans.
+    emoji = font_file(f"emoji:charset={ord(char):x}")
+    if is_color_font(emoji):
+        return emoji
     return font_file(f":charset={ord(char):x}")
 
 
@@ -109,7 +135,9 @@ class Panel:
 
     @property
     def animated(self) -> bool:
-        return any(line.animated for _, line in self.lines)
+        return any(
+            emote.animated for _, line in self.lines for _, _, emote, _ in line.animated
+        )
 
     def draw(self, now_ms: float) -> Image.Image:
         canvas = Image.new("RGBA", (self.width, self.height))
@@ -219,7 +247,9 @@ class ChatRenderer:
             return None
         height = round(size * EMOTE_SCALE)
         width = image.width_for(height)
-        if image.animated:
+        # Zero-width emotes are drawn in the per-frame layer too, so they stay on
+        # top of an animated emote they decorate.
+        if image.animated or emote.zero_width:
             return Piece(width, height, emote=image, zero_width=emote.zero_width)
         return Piece(
             width, height, image=image.frame(height, 0), zero_width=emote.zero_width
@@ -229,7 +259,8 @@ class ChatRenderer:
         pieces = []
         for path, run in self._runs(text, style):
             if is_color_font(path):
-                pieces.append(self._emoji_piece(path, run, size))
+                # One picture per emoji, so a long run can wrap.
+                pieces.extend(self._emoji_piece(path, g, size) for g in graphemes(run))
                 continue
             font = load_font(path, size)
             ascent, descent = font.getmetrics()
