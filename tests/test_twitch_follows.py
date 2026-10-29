@@ -51,6 +51,18 @@ class AccountTests(unittest.TestCase):
             with self.assertRaises(twitch_follows.TwitchError):
                 twitch_follows.load_account([Path(directory) / "missing.json", path])
 
+    def test_native_chatterino_settings_come_first_when_it_is_installed(self) -> None:
+        with patch.object(
+            twitch_follows.shutil,
+            "which",
+            side_effect=lambda name: (
+                "/usr/bin/chatterino" if name == "chatterino" else None
+            ),
+        ):
+            paths = twitch_follows.chatterino_settings_paths()
+        self.assertNotIn(".var", str(paths[0]))
+        self.assertIn(".var", str(paths[1]))
+
 
 class FetchTests(unittest.TestCase):
     def test_paginates_live_streams_and_adds_avatars(self) -> None:
@@ -226,6 +238,13 @@ class LaunchTests(unittest.TestCase):
         notify.assert_called_once_with(
             "Could not play big", "error: No playable streams found"
         )
+
+    def test_failed_stream_notifies_when_mpv_exits_in_the_same_poll(self) -> None:
+        self.fake_tools("echo 'error: offline' >&2; exit 1", "cat > /dev/null; exit 2")
+        with patch.object(twitch_follows, "notify") as notify:
+            code = twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+        self.assertEqual(code, 1)
+        notify.assert_called_once_with("Could not play big", "error: offline")
 
     def test_closing_mpv_stops_streamlink_without_notifying(self) -> None:
         self.fake_tools("trap 'exit 1' TERM; sleep 5 & wait", "exit 0")
