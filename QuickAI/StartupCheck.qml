@@ -1,10 +1,12 @@
 import QtQuick
 import qs.Common
+import qs.Services
 
 QtObject {
     function check(done) {
         const helperPath = Paths.strip(Qt.resolvedUrl("quick_ai.py"));
-        Proc.runCommand("quickAi.check", ["python3", helperPath, "--check"], (output, exitCode) => {
+        const model = PluginService.loadPluginData("quickAi", "model", "");
+        Proc.runCommand("quickAi.check", ["python3", helperPath, "--check", "--model", model], (output, exitCode) => {
             let result = null;
             try {
                 result = JSON.parse(output.trim());

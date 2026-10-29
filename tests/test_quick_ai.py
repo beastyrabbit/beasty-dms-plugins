@@ -280,6 +280,42 @@ class ProxyProviderTests(unittest.TestCase):
         self.assertIn("CLIProxyAPI", result["message"])
 
 
+class ModelSelectionTests(unittest.TestCase):
+    def test_selected_model_is_used(self) -> None:
+        command = quick_ai.build_command(
+            "ask", "auto", "/tmp/work", model="claude-haiku-5-5"
+        )
+        self.assertEqual(command[command.index("--model") + 1], "claude-haiku-5-5")
+
+    def test_empty_model_falls_back_to_default(self) -> None:
+        args = quick_ai.parse_args(["--model", "", "--mode", "ask", "--query", "x"])
+        self.assertEqual(args.model, quick_ai.DEFAULT_MODEL)
+
+    def test_invalid_model_is_rejected(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            quick_ai.parse_args(["--model", "-c x", "--mode", "ask", "--query", "x"])
+
+    @patch.object(quick_ai, "proxy_provider", return_value=PROXY)
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_lists_proxy_text_models_only(self, urlopen, _provider) -> None:
+        ids = ["gpt-6.1-sol", "gpt-image-2", "codex-auto-review", "claude-haiku-5-5"]
+        urlopen.return_value.__enter__.return_value = io.StringIO(
+            json.dumps({"data": [{"id": model} for model in ids]})
+        )
+        result = quick_ai.list_models()
+        self.assertEqual(result["models"], ["claude-haiku-5-5", "gpt-6.1-sol"])
+        self.assertEqual(result["default"], quick_ai.DEFAULT_MODEL)
+
+    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
+    @patch.object(quick_ai, "proxy_provider", return_value=PROXY)
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_check_validates_selected_model(self, urlopen, _provider, _resolve) -> None:
+        urlopen.return_value.__enter__.return_value = io.StringIO(
+            json.dumps({"data": [{"id": "claude-haiku-5-5"}]})
+        )
+        self.assertEqual(quick_ai.check_installation("claude-haiku-5-5"), {"ok": True})
+
+
 class ArgumentTests(unittest.TestCase):
     def test_blank_query_is_rejected(self) -> None:
         with redirect_stderr(io.StringIO()):

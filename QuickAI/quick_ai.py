@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -17,9 +18,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-ASK_MODEL = "gpt-5.6-terra"
-TRANSLATE_MODEL = "gpt-5.6-terra"
-SUMMARY_MODEL = "gpt-5.6-terra"
+DEFAULT_MODEL = "gpt-5.6-terra"
+MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$")
+# Proxy models that cannot answer text prompts through `codex exec`.
+UNUSABLE_MODEL_PATTERN = re.compile(r"image|auto-review")
 ASK_TIMEOUT_SECONDS = 30
 TRANSLATE_TIMEOUT_SECONDS = 30
 SUMMARY_TIMEOUT_SECONDS = 30
@@ -176,13 +178,9 @@ def build_command(
     workdir: str,
     codex_path: str = "codex",
     provider: dict[str, Any] | None = None,
+    model: str = DEFAULT_MODEL,
 ) -> list[str]:
     del target
-    model = {
-        "ask": ASK_MODEL,
-        "translate": TRANSLATE_MODEL,
-        "summarize": SUMMARY_MODEL,
-    }[mode]
     command = [
         codex_path,
         "exec",
@@ -274,14 +272,11 @@ def _signal_handler(_signum: int, _frame: Any) -> None:
     raise SystemExit(130)
 
 
-def execute(mode: str, query: str, target: str) -> dict[str, Any]:
+def execute(
+    mode: str, query: str, target: str, model: str = DEFAULT_MODEL
+) -> dict[str, Any]:
     global _child
     started = time.monotonic()
-    model = {
-        "ask": ASK_MODEL,
-        "translate": TRANSLATE_MODEL,
-        "summarize": SUMMARY_MODEL,
-    }[mode]
     timeout = {
         "ask": ASK_TIMEOUT_SECONDS,
         "translate": TRANSLATE_TIMEOUT_SECONDS,
@@ -301,7 +296,7 @@ def execute(mode: str, query: str, target: str) -> dict[str, Any]:
         environment[PROVIDER_TOKEN_ENV] = provider_token(provider) or ""
 
     with tempfile.TemporaryDirectory(prefix="dms-quick-ai-") as workdir:
-        command = build_command(mode, target, workdir, codex_path, provider)
+        command = build_command(mode, target, workdir, codex_path, provider, model)
         try:
             _child = subprocess.Popen(
                 command,
@@ -387,6 +382,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--check", action="store_true", help="check Codex login and model availability"
     )
+    parser.add_argument(
+        "--list-models", action="store_true", help="list models Quick AI can use"
+    )
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="model to answer with")
     parser.add_argument("--mode", choices=("ask", "translate", "summarize"))
     parser.add_argument("--target", choices=("auto", "en", "de"), default="auto")
     parser.add_argument("--query")
@@ -396,7 +395,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="summarize the current plain-text Wayland clipboard",
     )
     args = parser.parse_args(argv)
-    if args.check:
+    # An empty --model (no setting saved yet) means the default.
+    args.model = args.model or DEFAULT_MODEL
+    if not MODEL_PATTERN.match(args.model):
+        parser.error("invalid --model")
+    if args.check or args.list_models:
         return args
     if not args.mode:
         parser.error("--mode is required unless --check is used")
@@ -419,7 +422,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def check_proxy(provider: dict[str, Any]) -> dict[str, Any]:
+def proxy_models(provider: dict[str, Any]) -> tuple[list[str], str | None]:
+    """Return the proxy's text models, or an error message."""
     request = urllib.request.Request(provider["base_url"].rstrip("/") + "/models")
     token = provider_token(provider)
     if token:
@@ -429,30 +433,48 @@ def check_proxy(provider: dict[str, Any]) -> dict[str, Any]:
         with urllib.request.urlopen(request, timeout=8) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as error:
-        return {
-            "ok": False,
-            "message": f"{name} rejected Quick AI (HTTP {error.code}).",
-        }
+        return [], f"{name} rejected Quick AI (HTTP {error.code})."
     except (OSError, ValueError):
-        return {"ok": False, "message": f"Could not reach {name}."}
+        return [], f"Could not reach {name}."
     models = {
-        entry.get("id") for entry in payload.get("data", []) if isinstance(entry, dict)
+        entry.get("id")
+        for entry in payload.get("data", [])
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
     }
-    if not {ASK_MODEL, TRANSLATE_MODEL, SUMMARY_MODEL} <= models:
+    return sorted(m for m in models if not UNUSABLE_MODEL_PATTERN.search(m)), None
+
+
+def list_models() -> dict[str, Any]:
+    provider = proxy_provider()
+    if provider is None:
+        # Codex's built-in provider: offer the default only.
+        return {"ok": True, "models": [DEFAULT_MODEL], "default": DEFAULT_MODEL}
+    models, error = proxy_models(provider)
+    if error:
+        return {"ok": False, "message": error, "default": DEFAULT_MODEL}
+    return {"ok": True, "models": models, "default": DEFAULT_MODEL}
+
+
+def check_proxy(provider: dict[str, Any], model: str) -> dict[str, Any]:
+    models, error = proxy_models(provider)
+    if error:
+        return {"ok": False, "message": error}
+    if model not in models:
+        name = provider.get("name", "the model proxy")
         return {
             "ok": False,
-            "message": f"{name} does not serve the configured Quick AI model.",
+            "message": f"{name} does not serve {model}. Pick another model in the Quick AI settings.",
         }
     return {"ok": True}
 
 
-def check_installation() -> dict[str, Any]:
+def check_installation(model: str = DEFAULT_MODEL) -> dict[str, Any]:
     codex_path = resolve_codex()
     if codex_path is None:
         return {"ok": False, "message": "Codex CLI is not installed."}
     provider = proxy_provider()
     if provider is not None:
-        return check_proxy(provider)
+        return check_proxy(provider, model)
     try:
         login = subprocess.run(
             [codex_path, "login", "status"],
@@ -477,12 +499,7 @@ def check_installation() -> dict[str, Any]:
     except (OSError, subprocess.TimeoutExpired):
         return {"ok": False, "message": "Could not inspect the Codex installation."}
     output = models.stdout + models.stderr
-    if (
-        models.returncode != 0
-        or ASK_MODEL not in output
-        or TRANSLATE_MODEL not in output
-        or SUMMARY_MODEL not in output
-    ):
+    if models.returncode != 0 or model not in output:
         return {
             "ok": False,
             "message": "The configured Quick AI model is unavailable. Update Codex and retry.",
@@ -493,7 +510,10 @@ def check_installation() -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.check:
-        print(json.dumps(check_installation()))
+        print(json.dumps(check_installation(args.model)))
+        return 0
+    if args.list_models:
+        print(json.dumps(list_models()))
         return 0
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, _signal_handler)
@@ -514,7 +534,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         args.query = clipboard_text
-    print(json.dumps(execute(args.mode, args.query, args.target), ensure_ascii=False))
+    print(
+        json.dumps(
+            execute(args.mode, args.query, args.target, args.model), ensure_ascii=False
+        )
+    )
     return 0
 
 

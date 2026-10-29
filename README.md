@@ -22,7 +22,7 @@ dms ipc call plugins enable quickAi
 
 The `?` launcher menu always shows four actions: Quick Ask, Quick Translate, Summarize Input, and Summarize Clipboard. Ask remains the default; press ↓ to choose another action. Ask, Translate, and Summarize Input require text after `?`, while Summarize Clipboard works with an empty `?`. The popup is a read-only formatted result, includes a Copy button, and closes with Escape.
 
-All actions use Terra with low reasoning and standard speed rather than Codex Fast mode. Quick Ask allows web search when freshness matters; translation and summaries have no web access. Quick Translate automatically translates English ↔ German. Summaries stay in the source language and preserve important facts, dates, decisions, and action items.
+All actions use the model chosen in DMS Settings → Plugins → Quick AI (default `gpt-5.6-terra`), with low reasoning and standard speed rather than Codex Fast mode. The dropdown lists the text models the proxy serves. Quick Ask allows web search when freshness matters; translation and summaries have no web access. Quick Translate automatically translates English ↔ German. Summaries stay in the source language and preserve important facts, dates, decisions, and action items.
 
 Selecting Summarize Clipboard sends the current plain-text clipboard contents to Terra. Questions and clipboard contents are sent to Codex over stdin so they do not appear in the process argument list.
 

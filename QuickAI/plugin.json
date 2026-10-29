@@ -12,8 +12,9 @@
   },
   "trigger": "?",
   "icon": "bolt",
+  "settings": "./QuickAISettings.qml",
   "startupCheck": "./StartupCheck.qml",
   "requires_dms": ">=1.5.0",
   "dependencies": ["python3", "wl-paste"],
-  "permissions": ["process"]
+  "permissions": ["process", "settings_read", "settings_write"]
 }
