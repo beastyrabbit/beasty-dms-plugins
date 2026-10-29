@@ -11,6 +11,9 @@ import signal
 import subprocess
 import tempfile
 import time
+import tomllib
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +27,8 @@ MAX_ASK_CHARS = 4000
 MAX_TRANSLATE_CHARS = 1200
 MAX_SUMMARY_CHARS = 24000
 SCHEMA_PATH = Path(__file__).with_name("translation.schema.json")
+PROVIDER_ID = "quick-ai-proxy"
+PROVIDER_TOKEN_ENV = "QUICK_AI_PROVIDER_TOKEN"
 
 _child: subprocess.Popen[str] | None = None
 
@@ -125,11 +130,52 @@ def read_clipboard_text() -> tuple[str | None, str | None]:
     return text, None
 
 
+def proxy_provider() -> dict[str, Any] | None:
+    """Return the custom model provider (e.g. CLIProxyAPI) from the user's Codex config.
+
+    Quick AI runs Codex with --ignore-user-config, so the provider is passed
+    back in explicitly. None means the built-in OpenAI provider (ChatGPT login).
+    """
+    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    try:
+        config = tomllib.loads((codex_home / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    provider = config.get("model_providers", {}).get(config.get("model_provider"))
+    if not isinstance(provider, dict) or not provider.get("base_url"):
+        return None
+    return provider
+
+
+def provider_token(provider: dict[str, Any]) -> str | None:
+    if provider.get("env_key"):
+        return os.environ.get(provider["env_key"])
+    return provider.get("experimental_bearer_token")
+
+
+def provider_overrides(provider: dict[str, Any]) -> list[str]:
+    prefix = f"model_providers.{PROVIDER_ID}"
+    settings: dict[str, Any] = {
+        "name": provider.get("name", "Quick AI proxy"),
+        "base_url": provider["base_url"],
+        "wire_api": provider.get("wire_api", "responses"),
+        # The token travels through the environment, never the argument list.
+        "env_key": PROVIDER_TOKEN_ENV,
+    }
+    if "supports_websockets" in provider:
+        settings["supports_websockets"] = bool(provider["supports_websockets"])
+    overrides = ["-c", f'model_provider="{PROVIDER_ID}"']
+    for key, value in settings.items():
+        overrides += ["-c", f"{prefix}.{key}={json.dumps(value)}"]
+    return overrides
+
+
 def build_command(
     mode: str,
     target: str,
     workdir: str,
     codex_path: str = "codex",
+    provider: dict[str, Any] | None = None,
 ) -> list[str]:
     del target
     model = {
@@ -173,6 +219,8 @@ def build_command(
         "-C",
         workdir,
     ]
+    if provider is not None:
+        command += provider_overrides(provider)
     if mode == "ask":
         command.insert(1, "--search")
     elif mode == "translate":
@@ -247,11 +295,17 @@ def execute(mode: str, query: str, target: str) -> dict[str, Any]:
             mode, "missing_codex", "Codex CLI is not installed or not on PATH.", started
         )
 
+    provider = proxy_provider()
+    environment = dict(os.environ)
+    if provider is not None:
+        environment[PROVIDER_TOKEN_ENV] = provider_token(provider) or ""
+
     with tempfile.TemporaryDirectory(prefix="dms-quick-ai-") as workdir:
-        command = build_command(mode, target, workdir, codex_path)
+        command = build_command(mode, target, workdir, codex_path, provider)
         try:
             _child = subprocess.Popen(
                 command,
+                env=environment,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -365,10 +419,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def check_proxy(provider: dict[str, Any]) -> dict[str, Any]:
+    request = urllib.request.Request(provider["base_url"].rstrip("/") + "/models")
+    token = provider_token(provider)
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    name = provider.get("name", "the model proxy")
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as error:
+        return {
+            "ok": False,
+            "message": f"{name} rejected Quick AI (HTTP {error.code}).",
+        }
+    except (OSError, ValueError):
+        return {"ok": False, "message": f"Could not reach {name}."}
+    models = {
+        entry.get("id") for entry in payload.get("data", []) if isinstance(entry, dict)
+    }
+    if not {ASK_MODEL, TRANSLATE_MODEL, SUMMARY_MODEL} <= models:
+        return {
+            "ok": False,
+            "message": f"{name} does not serve the configured Quick AI model.",
+        }
+    return {"ok": True}
+
+
 def check_installation() -> dict[str, Any]:
     codex_path = resolve_codex()
     if codex_path is None:
         return {"ok": False, "message": "Codex CLI is not installed."}
+    provider = proxy_provider()
+    if provider is not None:
+        return check_proxy(provider)
     try:
         login = subprocess.run(
             [codex_path, "login", "status"],

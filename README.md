@@ -13,10 +13,9 @@ Personal [DMS](https://github.com/dangass/dms) plugins for Hyprland and niri.
 
 ## Quick AI setup
 
-Quick AI uses the installed Codex CLI and its existing ChatGPT login; it does not need an API key. It requires DMS 1.5 or newer.
+Quick AI uses the installed Codex CLI. It runs Codex without your user config (no MCP servers, hooks, or rules) but reuses the `model_provider` from `~/.codex/config.toml`: when that is a custom provider such as CLIProxyAPI, Quick AI sends requests there, passing the provider's bearer token to Codex through an environment variable rather than the argument list. Without a custom provider it falls back to Codex's own ChatGPT login (`codex login status`). The startup check lists the proxy's `/models` to confirm it serves Terra. It requires DMS 1.5 or newer.
 
 ```bash
-codex login status
 dms ipc call plugin-scan scan
 dms ipc call plugins enable quickAi
 ```

@@ -104,6 +104,11 @@ class OutputOnlyUiTests(unittest.TestCase):
 
 
 class ResponseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = patch.object(quick_ai, "proxy_provider", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @patch.object(quick_ai.subprocess, "Popen")
     @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
     def test_ask_success(self, _resolve, popen) -> None:
@@ -187,6 +192,94 @@ class ResponseTests(unittest.TestCase):
         self.assertEqual(quick_ai.check_installation(), {"ok": True})
 
 
+PROXY = {
+    "name": "CLIProxyAPI",
+    "base_url": "http://proxy.test:8317/v1",
+    "experimental_bearer_token": "test-token",
+    "wire_api": "responses",
+    "supports_websockets": True,
+}
+
+
+class ProxyProviderTests(unittest.TestCase):
+    def test_reads_configured_custom_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "config.toml").write_text(
+                'model_provider = "cpa"\n'
+                "[model_providers.cpa]\n"
+                'base_url = "http://proxy.test:8317/v1"\n',
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"CODEX_HOME": directory}):
+                provider = quick_ai.proxy_provider()
+        self.assertEqual(provider, {"base_url": "http://proxy.test:8317/v1"})
+
+    def test_builtin_provider_needs_no_proxy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "config.toml").write_text(
+                'model = "gpt-6.1-sol"\n', encoding="utf-8"
+            )
+            with patch.dict(os.environ, {"CODEX_HOME": directory}):
+                self.assertIsNone(quick_ai.proxy_provider())
+
+    def test_command_routes_through_proxy_without_exposing_token(self) -> None:
+        command = quick_ai.build_command("ask", "auto", "/tmp/work", provider=PROXY)
+        joined = " ".join(command)
+        self.assertIn('model_provider="quick-ai-proxy"', command)
+        self.assertIn(
+            'model_providers.quick-ai-proxy.base_url="http://proxy.test:8317/v1"',
+            command,
+        )
+        self.assertIn(
+            'model_providers.quick-ai-proxy.env_key="QUICK_AI_PROVIDER_TOKEN"',
+            command,
+        )
+        self.assertIn(
+            "model_providers.quick-ai-proxy.supports_websockets=true", command
+        )
+        self.assertNotIn("test-token", joined)
+        self.assertEqual(command[-1], "-")
+
+    @patch.object(quick_ai.subprocess, "Popen")
+    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
+    @patch.object(quick_ai, "proxy_provider", return_value=PROXY)
+    def test_token_is_passed_through_environment(
+        self, _provider, _resolve, popen
+    ) -> None:
+        popen.return_value = FakeProcess("A short answer")
+        result = quick_ai.execute("ask", "Question", "auto")
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            popen.call_args.kwargs["env"]["QUICK_AI_PROVIDER_TOKEN"], "test-token"
+        )
+        self.assertNotIn("test-token", " ".join(popen.call_args.args[0]))
+
+    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
+    @patch.object(quick_ai, "proxy_provider", return_value=PROXY)
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_check_uses_proxy_model_list(self, urlopen, _provider, _resolve) -> None:
+        urlopen.return_value.__enter__.return_value = io.StringIO(
+            json.dumps({"data": [{"id": "gpt-5.6-terra"}]})
+        )
+        self.assertEqual(quick_ai.check_installation(), {"ok": True})
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://proxy.test:8317/v1/models")
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+
+    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
+    @patch.object(quick_ai, "proxy_provider", return_value=PROXY)
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_check_reports_missing_proxy_model(
+        self, urlopen, _provider, _resolve
+    ) -> None:
+        urlopen.return_value.__enter__.return_value = io.StringIO(
+            json.dumps({"data": [{"id": "gpt-6.1-sol"}]})
+        )
+        result = quick_ai.check_installation()
+        self.assertFalse(result["ok"])
+        self.assertIn("CLIProxyAPI", result["message"])
+
+
 class ArgumentTests(unittest.TestCase):
     def test_blank_query_is_rejected(self) -> None:
         with redirect_stderr(io.StringIO()):
@@ -252,6 +345,7 @@ class DmsProcessIntegrationTests(unittest.TestCase):
             fake_codex.chmod(0o700)
             environment = dict(os.environ)
             environment["QUICK_AI_CODEX"] = str(fake_codex)
+            environment["CODEX_HOME"] = directory
             process = quick_ai.subprocess.Popen(
                 [
                     sys.executable,
