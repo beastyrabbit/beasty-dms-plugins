@@ -17,7 +17,7 @@ import jsonschema
 
 
 INVENTORY_NAME = "plugins.json"
-SCHEMA = Path("/usr/share/quickshell/dms/PLUGINS/plugin-schema.json")
+LEGACY_SHELL_DIR = Path("/usr/share/quickshell/dms")
 IGNORED_FILE_NAMES = {"__pycache__"}
 IGNORED_SUFFIXES = {".pyc"}
 
@@ -97,10 +97,42 @@ def referenced_paths(value: Any) -> list[str]:
     return []
 
 
+def shell_dir() -> Path:
+    """Locate the DMS QML tree.
+
+    DMS 2.0 embeds its UI in the binary and unpacks it to
+    $XDG_RUNTIME_DIR/dms-shell/<hash> at launch; older releases installed it
+    to /usr/share/quickshell/dms.
+    """
+    override = os.environ.get("DMS_SHELL_DIR")
+    if override:
+        return Path(override).expanduser()
+    if LEGACY_SHELL_DIR.is_dir():
+        return LEGACY_SHELL_DIR
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+    candidates = [
+        path
+        for path in (runtime / "dms-shell").glob("*")
+        if (path / "shell.qml").is_file()
+    ]
+    if not candidates:
+        raise RuntimeError(
+            "DMS shell directory not found; start DMS or set DMS_SHELL_DIR"
+        )
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def plugin_dir() -> Path:
+    return Path(
+        os.environ.get("DMS_PLUGIN_DIR", Path.home() / ".config" / "dms" / "plugins")
+    ).expanduser()
+
+
 def load_schema() -> dict[str, Any]:
-    if not SCHEMA.is_file():
-        raise RuntimeError(f"DMS plugin schema not found: {SCHEMA}")
-    return json.loads(SCHEMA.read_text(encoding="utf-8"))
+    schema = shell_dir() / "PLUGINS" / "plugin-schema.json"
+    if not schema.is_file():
+        raise RuntimeError(f"DMS plugin schema not found: {schema}")
+    return json.loads(schema.read_text(encoding="utf-8"))
 
 
 def validate_manifest(
@@ -243,11 +275,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="validate committed HEAD instead of the index",
     )
+    parser.add_argument(
+        "--shell-dir",
+        action="store_true",
+        help="print the DMS QML directory (for qmllint -I) and exit",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.shell_dir:
+        try:
+            print(shell_dir())
+        except RuntimeError as error:
+            print(error, file=sys.stderr)
+            return 1
+        return 0
     try:
         root = repository_root()
         if args.head:
@@ -256,12 +300,7 @@ def main(argv: list[str] | None = None) -> int:
             plugins = load_inventory(root)
             errors = repository_errors(root, plugins)
             if not args.repo_only:
-                dms_plugin_dir = Path(
-                    os.environ.get(
-                        "DMS_PLUGIN_DIR",
-                        Path.home() / ".config" / "DankMaterialShell" / "plugins",
-                    )
-                ).expanduser()
+                dms_plugin_dir = plugin_dir()
                 deployment_root = Path(
                     os.environ.get(
                         "DMS_PLUGIN_DEPLOY_ROOT",

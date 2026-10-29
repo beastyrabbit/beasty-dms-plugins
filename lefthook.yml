@@ -11,10 +11,11 @@ pre-commit:
     qml-lint:
       glob: "*.qml"
       run: |
+        dms_dir=$(python3 scripts/plugin_doctor.py --shell-dir) || exit 1
         for f in {staged_files}; do
           if [ -f "$f" ]; then
-            qmlformat "$f" > /dev/null || exit 1
-            qmllint -I /usr/share/quickshell/dms "$f" || exit 1
+            /usr/lib/qt6/bin/qmlformat "$f" > /dev/null || exit 1
+            /usr/lib/qt6/bin/qmllint -I "$dms_dir" "$f" || exit 1
           fi
         done
         QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/tst_quick_ai_launcher.qml

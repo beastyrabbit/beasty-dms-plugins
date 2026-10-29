@@ -50,7 +50,7 @@ Offline verification (no model calls):
 ```bash
 python3 -m unittest discover -s tests -v
 QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/tst_quick_ai_launcher.qml
-qmllint -I /usr/share/quickshell/dms QuickAI/*.qml
+qmllint -I "$(python3 scripts/plugin_doctor.py --shell-dir)" QuickAI/*.qml
 python3 scripts/validate_plugin.py QuickAI/plugin.json
 python3 scripts/plugin_doctor.py --repo-only
 ```

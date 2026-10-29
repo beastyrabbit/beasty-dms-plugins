@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Hyprland
+import qs.Services
 
 Item {
     id: root
@@ -28,16 +29,17 @@ Item {
         Hyprland.focusedMonitor?.lastIpcObject?.specialWorkspace?.name ?? ""
 
     // --- Actions ---
+    // HyprlandService emits the right dispatch syntax for legacy and Lua configs.
     function switchWorkspace(num) {
-        Hyprland.dispatch("workspace " + num)
+        HyprlandService.focusWorkspace(num)
     }
 
     function switchNamedWorkspace(name) {
-        Hyprland.dispatch("workspace name:" + name)
+        HyprlandService.focusWorkspace("name:" + name)
     }
 
     function toggleSpecial(name) {
-        Hyprland.dispatch("togglespecialworkspace " + name)
+        HyprlandService.toggleSpecial(name)
     }
 
     // --- Query Functions ---

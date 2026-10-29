@@ -8,16 +8,15 @@ import sys
 from pathlib import Path
 
 import jsonschema
-
-
-SCHEMA = Path("/usr/share/quickshell/dms/PLUGINS/plugin-schema.json")
+from plugin_doctor import load_schema
 
 
 def main(paths: list[str]) -> int:
-    if not SCHEMA.is_file():
-        print(f"DMS plugin schema not found: {SCHEMA}", file=sys.stderr)
+    try:
+        schema = load_schema()
+    except RuntimeError as error:
+        print(error, file=sys.stderr)
         return 1
-    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
     failed = False
     for raw_path in paths:
         path = Path(raw_path)

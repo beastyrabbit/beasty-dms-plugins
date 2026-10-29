@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
@@ -14,6 +15,7 @@ from plugin_doctor import (  # noqa: E402
     deployment_errors,
     parse_inventory,
     referenced_paths,
+    shell_dir,
 )
 
 
@@ -102,6 +104,24 @@ class DeploymentTests(unittest.TestCase):
             any("disposable Orca worktree" in error for error in errors), errors
         )
         self.assertTrue(any("dangling" in error for error in errors), errors)
+
+
+class ShellDirTests(unittest.TestCase):
+    def test_prefers_explicit_override(self) -> None:
+        with patch.dict(os.environ, {"DMS_SHELL_DIR": "/opt/dms"}):
+            self.assertEqual(shell_dir(), Path("/opt/dms"))
+
+    def test_finds_embedded_shell_in_runtime_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            extracted = Path(temporary) / "dms-shell" / "240b104259eeb03f"
+            extracted.mkdir(parents=True)
+            (extracted / "shell.qml").write_text("", encoding="utf-8")
+            environment = {"XDG_RUNTIME_DIR": temporary, "DMS_SHELL_DIR": ""}
+            with (
+                patch.dict(os.environ, environment),
+                patch("plugin_doctor.LEGACY_SHELL_DIR", Path(temporary) / "none"),
+            ):
+                self.assertEqual(shell_dir(), extracted)
 
 
 if __name__ == "__main__":

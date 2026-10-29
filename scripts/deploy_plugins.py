@@ -16,6 +16,7 @@ from pathlib import Path
 from plugin_doctor import (
     deployment_errors,
     load_inventory,
+    plugin_dir,
     repository_errors,
     repository_root,
 )
@@ -92,12 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         print(dirty, file=sys.stderr)
         return 1
 
-    dms_plugin_dir = Path(
-        os.environ.get(
-            "DMS_PLUGIN_DIR",
-            Path.home() / ".config" / "DankMaterialShell" / "plugins",
-        )
-    ).expanduser()
+    dms_plugin_dir = plugin_dir()
     deployment_root = Path(
         os.environ.get(
             "DMS_PLUGIN_DEPLOY_ROOT",
