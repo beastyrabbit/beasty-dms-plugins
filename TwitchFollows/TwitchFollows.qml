@@ -101,7 +101,6 @@ PluginComponent {
 
     popoutWidth: 420
     popoutHeight: 520
-    Component.onCompleted: refresh(false)
     Component.onDestruction: Proc.release(fetchId)
 
     PluginGlobalVar {
@@ -111,10 +110,12 @@ PluginComponent {
         defaultValue: ({})
     }
 
+    // pluginId is injected after creation; the shared state can't be written before it.
     Timer {
         interval: root.refreshSeconds * 1000
         repeat: true
-        running: true
+        running: root.pluginId !== ""
+        triggeredOnStart: true
         onTriggered: root.refresh(false)
     }
 
