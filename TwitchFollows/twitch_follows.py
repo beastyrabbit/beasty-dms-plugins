@@ -62,13 +62,14 @@ class TwitchError(Exception):
 def chatterino_settings_paths() -> list[Path]:
     home = Path.home()
     data = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
-    return [
-        home
-        / ".var/app"
-        / CHATTERINO_FLATPAK_ID
-        / "data/chatterino/Settings/settings.json",
-        data / "chatterino/Settings/settings.json",
-    ]
+    flatpak = (
+        home / ".var/app" / CHATTERINO_FLATPAK_ID / "data/chatterino/Settings"
+    ) / "settings.json"
+    native = data / "chatterino/Settings/settings.json"
+    # Read the account of the Chatterino that chatterino_command() opens.
+    if shutil.which("chatterino") or shutil.which("chatterino2"):
+        return [native, flatpak]
+    return [flatpak, native]
 
 
 def load_account(paths: list[Path] | None = None) -> dict[str, str]:
@@ -306,12 +307,17 @@ def play(
             # streamlink ending first means the stream failed or ended.
             while viewer.poll() is None and source.poll() is None:
                 time.sleep(0.2)
-            stream_failed = viewer.poll() is None and source.returncode != 0
-            if viewer.poll() is None:
+            source_ended_first = viewer.poll() is None
+            if source_ended_first:
                 viewer.wait()
             else:
                 source.terminate()
             source.wait()
+            # Both can be gone by the same poll: mpv exits 2 when it got no
+            # video, but 0 when the user quit it.
+            stream_failed = source.returncode != 0 and (
+                source_ended_first or viewer.returncode != 0
+            )
     finally:
         overlay.terminate()
         overlay.wait()
