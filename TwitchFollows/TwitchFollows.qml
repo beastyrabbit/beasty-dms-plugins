@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import qs.Common
 import qs.DCommon.Widgets
 import qs.Modules.Plugins
@@ -12,7 +13,7 @@ PluginComponent {
     readonly property int refreshSeconds: parseInt(pluginData.refreshSeconds ?? "120") || 120
     readonly property string quality: pluginData.quality || "best"
     readonly property bool chatOverlay: pluginData.chatOverlay ?? true
-    readonly property string volume: String(pluginData.volume ?? "25")
+    readonly property string volume: String(pluginData.volume ?? "30")
 
     // Shared by every bar instance (one per screen), so only one fetch runs per interval.
     readonly property var follows: followsVar.value
@@ -21,6 +22,12 @@ PluginComponent {
     readonly property bool loaded: follows.ok !== undefined
     property bool fetching: false
     readonly property string fetchId: "twitchFollows.list." + Math.random().toString(36).slice(2)
+    // Viewing groups (streams sharing one chat window), numbered in order.
+    property var groups: []
+
+    function groupOf(login) {
+        return groups.findIndex(group => group.streams.some(stream => stream.login === login));
+    }
 
     function refresh(force) {
         const age = Date.now() - (follows.fetchedAt ?? 0);
@@ -60,11 +67,16 @@ PluginComponent {
         Quickshell.execDetached(["systemd-run", "--user", "--scope", "--quiet", "--collect", "python3", helperPath].concat(args));
     }
 
-    function watch(channel, muted) {
+    // Without a groupId the stream starts a new group.
+    function watch(channel, muted, groupId) {
         const title = channel.title ? channel.name + " - " + channel.title : channel.name;
-        const args = ["--watch", channel.login, "--quality", quality, "--volume", muted ? "0" : volume, "--media-title", title];
+        const args = ["--watch", channel.login, "--quality", quality, "--volume", volume, "--media-title", title];
+        if (muted)
+            args.push("--muted");
         if (!chatOverlay)
             args.push("--no-chat-overlay");
+        if (groupId)
+            args.push("--group", groupId);
         launch(args);
     }
 
@@ -86,6 +98,29 @@ PluginComponent {
         running: root.pluginId !== ""
         triggeredOnStart: true
         onTriggered: root.refresh(false)
+    }
+
+    // The helper rewrites this file whenever a stream joins or leaves a group.
+    FileView {
+        id: groupsFile
+
+        path: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/twitch-follows-groups.json"
+        printErrors: false
+        onLoaded: {
+            try {
+                root.groups = JSON.parse(text()).groups ?? [];
+            } catch (error) {}
+        }
+        onLoadFailed: root.groups = []
+    }
+
+    // The groups only show in the open list, so only poll while it is open.
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.interactionActive
+        triggeredOnStart: true
+        onTriggered: groupsFile.reload()
     }
 
     horizontalBarPill: Component {
@@ -165,6 +200,7 @@ PluginComponent {
                     id: row
 
                     required property var modelData
+                    readonly property int groupIndex: root.groupOf(modelData.login)
 
                     width: channelList.width
                     height: 52
@@ -173,6 +209,15 @@ PluginComponent {
 
                     HoverHandler {
                         id: rowHover
+                    }
+
+                    // Below the group buttons, so they keep their own clicks.
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: row.groupIndex < 0
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: mouse => root.watch(row.modelData, mouse.button === Qt.RightButton, "")
                     }
 
                     DCircularImage {
@@ -224,14 +269,34 @@ PluginComponent {
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: Theme.spacingXS
 
-                        DIconButton {
-                            iconName: "play_arrow"
-                            tooltipText: "Watch with chat (right-click: muted)"
-                            onClicked: root.watch(row.modelData, false)
+                        DBadge {
+                            visible: row.groupIndex >= 0
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: String(row.groupIndex + 1)
+                            tooltipText: "Watching in group " + (row.groupIndex + 1)
+                        }
 
-                            TapHandler {
-                                acceptedButtons: Qt.RightButton
-                                onTapped: root.watch(row.modelData, true)
+                        Repeater {
+                            model: row.groupIndex < 0 ? root.groups : []
+
+                            delegate: DButton {
+                                id: joinButton
+
+                                required property var modelData
+                                required property int index
+
+                                visible: modelData.shared
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: String(index + 1)
+                                buttonHeight: Theme.iconSize + Theme.spacingS * 2
+                                minimumWidth: buttonHeight
+                                tooltipText: "Add to group " + (index + 1) + " with " + modelData.streams.map(stream => stream.login).join(", ") + " (right-click: muted)"
+                                onClicked: root.watch(row.modelData, false, modelData.id)
+
+                                TapHandler {
+                                    acceptedButtons: Qt.RightButton
+                                    onTapped: root.watch(row.modelData, true, joinButton.modelData.id)
+                                }
                             }
                         }
                     }

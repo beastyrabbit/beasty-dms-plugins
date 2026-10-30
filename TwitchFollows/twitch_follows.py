@@ -11,8 +11,10 @@ import argparse
 import contextlib
 import fcntl
 import json
+import math
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -32,40 +34,79 @@ CHATTERINO_FLATPAK_ID = "com.chatterino.chatterino"
 CHATTERINO_CLASSES = {CHATTERINO_FLATPAK_ID, "chatterino"}
 CHAT_WINDOW_WAIT_SECONDS = 20
 ADDRESS_PATTERN = re.compile(r"^0x[0-9a-f]+$")
-# Puts the stream window (STREAM) and its Chatterino window (CHAT) into one
-# locked Hyprland tab group with the stream as the shown tab. Hyprland may
-# already have auto-grouped either window into whatever unlocked group was
-# focused, so each first leaves any group that holds other windows.
-GROUP_LUA = """
-local S, C = "STREAM", "CHAT"
+GROUP_ID_PATTERN = re.compile(r"^[0-9a-f]{8}$")
+# Viewing groups: streams that share one Chatterino window. The QML reads this
+# file to number the groups; only the helper writes it, under GROUPS_LOCK.
+GROUPS_FILE = "twitch-follows-groups.json"
+GROUPS_LOCK = "twitch-follows-groups.lock"
+# Arranges a viewing group. SPEC is the hyprweave layout tree (streams in a
+# grid, the shared chat in a strip below), WINDOWS the same windows as a list,
+# streams first, and FOCUS the window to focus ("" after a stream left).
+# The hyprweave group stays unlocked: hyprweave closes every member of a
+# locked group when one closes, but a stream that ends should only leave its
+# group. The old group is dissolved and created again whenever a stream joins
+# or leaves (create() on windows that are still woven is untested upstream).
+# Without hyprweave, the windows become a locked Hyprland tab group showing
+# the new stream. Hyprland may already have auto-grouped a window into
+# whatever unlocked group was focused, so each first leaves any group that
+# holds other windows. A stream leaving a tab group needs nothing.
+ARRANGE_LUA = """
+local spec, wins, focus = SPEC, WINDOWS, "FOCUS"
 local function sel(a) return "address:" .. a end
+for _, a in ipairs(wins) do
+  if not hl.get_window(sel(a)) then return "missing" end
+end
+local weave = hl.plugin.hyprweave
+if weave then
+  for _, a in ipairs(wins) do
+    if weave.get({ window = sel(a) }) then weave.dissolve({ window = sel(a) }) end
+  end
+end
+if weave and weave.create(spec) then
+  if focus ~= "" then hl.dispatch(hl.dsp.focus({ window = sel(focus) })) end
+  return "ok"
+end
+if focus == "" then return "ok" end
 local function index_of(group, a)
   for i, m in ipairs(group and group.members or {}) do
     if m.address == a then return i end
   end
 end
-for _, a in ipairs({ S, C }) do
+local ours = {}
+for _, a in ipairs(wins) do ours[a] = true end
+for _, a in ipairs(wins) do
   local w = hl.get_window(sel(a))
-  if not w then return "missing" end
   for _, m in ipairs(w.group and w.group.members or {}) do
-    if m.address ~= S and m.address ~= C then w.group:remove(w) break end
+    if not ours[m.address] then w.group:remove(w) break end
   end
 end
-if not hl.get_window(sel(S)).group then
-  hl.dispatch(hl.dsp.group.toggle({ window = sel(S) }))
+local first = wins[1]
+-- lock_active toggles the focused window's group whatever its action says,
+-- so it only runs when the lock has to change.
+local function set_locked(locked)
+  if hl.get_window(sel(first)).group.locked ~= locked then
+    hl.dispatch(hl.dsp.focus({ window = sel(first) }))
+    hl.dispatch(hl.dsp.group.lock_active({ action = locked and "lock" or "unlock" }))
+  end
 end
-local stream, chat = hl.get_window(sel(S)), hl.get_window(sel(C))
-if not index_of(stream.group, C) then
-  if chat.group then chat.group:remove(chat) end
-  stream.group:add(chat)
+if not hl.get_window(sel(first)).group then
+  hl.dispatch(hl.dsp.group.toggle({ window = sel(first) }))
 end
-stream = hl.get_window(sel(S))
-hl.dispatch(hl.dsp.group.active({ index = index_of(stream.group, S), window = sel(S) }))
-hl.dispatch(hl.dsp.focus({ window = sel(S) }))
-hl.dispatch(hl.dsp.group.lock_active({ action = "lock" }))
+set_locked(false)
+for _, a in ipairs(wins) do
+  local group, w = hl.get_window(sel(first)).group, hl.get_window(sel(a))
+  if not index_of(group, a) then
+    if w.group then w.group:remove(w) end
+    group:add(w)
+  end
+end
+local group = hl.get_window(sel(first)).group
+hl.dispatch(hl.dsp.group.active({ index = index_of(group, focus), window = sel(first) }))
+set_locked(true)
+hl.dispatch(hl.dsp.focus({ window = sel(focus) }))
 return "ok"
 """
-DEFAULT_VOLUME = 25
+DEFAULT_VOLUME = 30
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,25}$")
 QUALITY_PATTERN = re.compile(r"^[A-Za-z0-9_,+-]{1,40}$")
 # Twitch renditions from highest to lowest. Transcodes are named like 480p30;
@@ -251,64 +292,221 @@ def chatterino_windows(clients: list[dict[str, Any]]) -> set[str]:
     return {c["address"] for c in clients if c.get("class") in CHATTERINO_CLASSES}
 
 
-def open_chat_tab(
-    login: str, viewer: subprocess.Popen
-) -> tuple[subprocess.Popen, str] | None:
-    """Open Chatterino for the channel and tab it behind the stream window.
+def pid_alive(pid: Any) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
 
-    Returns the Chatterino process and its window address ("" when it could
-    not be grouped), or None when Chatterino is not installed.
+
+def load_groups() -> list[dict[str, Any]]:
+    """The viewing groups, without streams whose helper died without leaving."""
+    try:
+        groups = json.loads(runtime_path(GROUPS_FILE).read_text())["groups"]
+        for group in groups:
+            group["streams"] = [s for s in group["streams"] if pid_alive(s["pid"])]
+    except (OSError, ValueError, LookupError, TypeError):
+        return []
+    return [group for group in groups if group["streams"]]
+
+
+def save_groups(groups: list[dict[str, Any]]) -> None:
+    # Replaced in one step, so the QML and chat_closed() never read half a file.
+    path = runtime_path(GROUPS_FILE)
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps({"groups": groups}))
+    temporary.replace(path)
+
+
+def chat_instance(group: dict[str, Any]) -> list[str]:
+    return ["--instance", f"twitchfollows-{group['id']}"]
+
+
+def grid_rows(streams: list[str]) -> list[list[str]]:
+    """Side by side, with a second row only from three streams on: on a 16:9
+    screen, 2 streams get one row, 3-4 a 2x2 grid and 5-6 a 3x2 grid."""
+    columns = math.ceil(math.sqrt(len(streams)))
+    return [streams[i : i + columns] for i in range(0, len(streams), columns)]
+
+
+def weave_spec(streams: list[str], chat: str) -> dict[str, Any]:
+    """The hyprweave tree for ARRANGE_LUA: the streams in a grid filling 75%
+    of the height and the chat below them across the full width."""
+
+    def window(address: str) -> dict[str, Any]:
+        return {"window": f"address:{address}"}
+
+    rows = [
+        {"direction": "row", "children": [window(a) for a in row]}
+        if len(row) > 1
+        else window(row[0])
+        for row in grid_rows(streams)
+    ]
+    video = rows[0] if len(rows) == 1 else {"direction": "column", "children": rows}
+    style = {"lock": "none", "gap": 0, "background": "rgb(8c9388)"}
+    if not chat:
+        return {**video, **style}
+    return {
+        "direction": "column",
+        **style,
+        "children": [{**video, "size": 75}, {**window(chat), "size": 25}],
+    }
+
+
+def lua_value(value: Any) -> str:
+    if isinstance(value, dict):
+        return (
+            "{ " + ", ".join(f"{k} = {lua_value(v)}" for k, v in value.items()) + " }"
+        )
+    if isinstance(value, list):
+        return "{ " + ", ".join(lua_value(v) for v in value) + " }"
+    if isinstance(value, str):
+        return json.dumps(value)
+    return str(value)
+
+
+def arrange(hyprctl: str, group: dict[str, Any], focus: str = "") -> None:
+    """Lays out the group's open windows; see ARRANGE_LUA."""
+    present = {c.get("address") for c in hypr_clients(hyprctl)}
+    streams = [s["window"] for s in group["streams"] if s["window"] in present]
+    chat = group["chat"] if group["chat"] in present else ""
+    windows = [*streams, chat] if chat else streams
+    if len(windows) < 2 or not all(ADDRESS_PATTERN.match(w) for w in windows):
+        return
+    lua = (
+        ARRANGE_LUA.replace("FOCUS", focus if focus in streams else "")
+        .replace("WINDOWS", lua_value(windows))
+        .replace("SPEC", lua_value(weave_spec(streams, chat)))
+    )
+    subprocess.run([hyprctl, "repl", lua], capture_output=True, check=False)
+
+
+def join_group(
+    login: str, viewer: subprocess.Popen, group_id: str
+) -> tuple[dict[str, Any], subprocess.Popen | None]:
+    """Adds the stream to a viewing group and opens its chat there.
+
+    Without group_id, or when that group has closed, the stream starts a new
+    group. A native Chatterino (the chatterino-slim fork) shares one window
+    per group: the first stream starts it as a named instance, and later
+    streams hand it their channel as another tab. The Flatpak can't, so it
+    opens one window per stream and each stream gets its own group.
+
+    Returns the group and the Chatterino process started here, if any.
     """
     command = chatterino_command()
-    if not command:
-        return None
+    shared = bool(command) and Path(command[0]).name != "flatpak"
     hyprctl = shutil.which("hyprctl")
-    # One launch at a time, so a new Chatterino window can't be taken for
-    # another channel's.
-    with file_lock("twitch-follows-chat-launch.lock", blocking=True):
-        before = chatterino_windows(hypr_clients(hyprctl)) if hyprctl else set()
-        # -c starts a separate Chatterino with only this channel and without
-        # saving its layout.
-        chat = subprocess.Popen(
-            [*command, "-c", f"t:{login}"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+    # One join or leave at a time, so a new Chatterino window can't be taken
+    # for another group's and the layouts don't race.
+    with file_lock(GROUPS_LOCK, blocking=True):
+        groups = load_groups()
+        group = next(
+            (g for g in groups if shared and g["shared"] and g["id"] == group_id),
+            None,
         )
-        if not hyprctl:
-            return chat, ""
-        deadline = time.monotonic() + CHAT_WINDOW_WAIT_SECONDS
-        stream_window = chat_window = ""
-        while viewer.poll() is None and chat.poll() is None:
-            clients = hypr_clients(hyprctl)
-            stream_window = next(
-                (c["address"] for c in clients if c.get("pid") == viewer.pid), ""
+        if group is None:
+            group = {
+                "id": secrets.token_hex(4),
+                "shared": shared,
+                "chat": "",
+                "chatPid": 0,
+                "streams": [],
+            }
+            groups.append(group)
+        stream = {"login": login, "pid": os.getpid(), "window": ""}
+        group["streams"].append(stream)
+        save_groups(groups)
+        before = chatterino_windows(hypr_clients(hyprctl)) if hyprctl else set()
+        chat = None
+        if command:
+            # -c opens only this channel without saving the layout. With
+            # --instance, a running instance takes the channel as a tab and
+            # this process exits right away.
+            slim = ["--slim", *chat_instance(group)] if shared else []
+            chat = subprocess.Popen(
+                [*command, *slim, "-c", f"t:{login}"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-            chat_window = min(chatterino_windows(clients) - before, default="")
-            if (stream_window and chat_window) or time.monotonic() > deadline:
-                break
-            time.sleep(0.1)
-    if not (
-        ADDRESS_PATTERN.match(stream_window) and ADDRESS_PATTERN.match(chat_window)
-    ):
-        return chat, ""
-    lua = GROUP_LUA.replace("STREAM", stream_window).replace("CHAT", chat_window)
-    subprocess.run([hyprctl, "repl", lua], capture_output=True, check=False)
-    return chat, chat_window
+        if hyprctl:
+            deadline = time.monotonic() + CHAT_WINDOW_WAIT_SECONDS
+            while viewer.poll() is None:
+                clients = hypr_clients(hyprctl)
+                stream["window"] = next(
+                    (c["address"] for c in clients if c.get("pid") == viewer.pid), ""
+                )
+                chats = chatterino_windows(clients)
+                new_chat = min(chats - before, default="")
+                if new_chat:
+                    group["chat"] = new_chat
+                    group["chatPid"] = next(
+                        c.get("pid", 0) for c in clients if c["address"] == new_chat
+                    )
+                chat_done = chat is None or chat.poll() is not None
+                if stream["window"] and (group["chat"] in chats or chat_done):
+                    break
+                if time.monotonic() > deadline:
+                    break
+                time.sleep(0.1)
+            save_groups(groups)
+            arrange(hyprctl, group, focus=stream["window"])
+    return group, chat
 
 
-def close_chat_tab(chat: subprocess.Popen, window: str) -> None:
+def chat_closed(group_id: str) -> bool:
+    """True once the group's Chatterino is gone while its streams still play,
+    which means the user closed the chat."""
+    group = next((g for g in load_groups() if g["id"] == group_id), None)
+    return bool(group and group["chatPid"]) and not pid_alive(group["chatPid"])
+
+
+def leave_group(
+    login: str, joined: dict[str, Any], chat: subprocess.Popen | None
+) -> None:
+    """Takes the stream out of its group and closes its chat tab. The chat
+    window closes with the group's last stream."""
+    command = chatterino_command()
     hyprctl = shutil.which("hyprctl")
-    if window and hyprctl:
-        close = f'hl.dispatch(hl.dsp.window.close({{ window = "address:{window}" }}))'
-        subprocess.run([hyprctl, "repl", close], capture_output=True, check=False)
-    else:
-        chat.terminate()
-    try:
-        chat.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        chat.terminate()
-        chat.wait()
+    with file_lock(GROUPS_LOCK, blocking=True):
+        groups = load_groups()
+        group = next((g for g in groups if g["id"] == joined["id"]), None)
+        remaining = []
+        if group:
+            group["streams"] = [s for s in group["streams"] if s["pid"] != os.getpid()]
+            remaining = group["streams"]
+            if not remaining:
+                groups.remove(group)
+            save_groups(groups)
+        if joined["shared"] and command:
+            # Closing the instance's last tab quits it; without a running
+            # instance this does nothing.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                subprocess.run(
+                    [*command, *chat_instance(joined), "--remove", f"t:{login}"],
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+        elif joined["chat"] and hyprctl:
+            close = f'hl.dispatch(hl.dsp.window.close({{ window = "address:{joined["chat"]}" }}))'
+            subprocess.run([hyprctl, "repl", close], capture_output=True, check=False)
+        elif chat:
+            chat.terminate()
+        if group and remaining and hyprctl:
+            arrange(hyprctl, group)
+    if chat and not remaining:
+        try:
+            chat.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            chat.terminate()
+            chat.wait()
 
 
 def watch(
@@ -317,6 +515,8 @@ def watch(
     chat_overlay: bool = True,
     volume: int = DEFAULT_VOLUME,
     media_title: str = "",
+    group_id: str = "",
+    muted: bool = False,
 ) -> int:
     streamlink = shutil.which("streamlink")
     mpv = shutil.which("mpv")
@@ -330,7 +530,15 @@ def watch(
         if not acquired:
             return 0
         return play(
-            streamlink, mpv, login, quality, chat_overlay, volume, media_title or login
+            streamlink,
+            mpv,
+            login,
+            quality,
+            chat_overlay,
+            volume,
+            media_title or login,
+            group_id,
+            muted,
         )
 
 
@@ -342,14 +550,18 @@ def play(
     chat_overlay: bool,
     volume: int,
     media_title: str,
+    group_id: str,
+    muted: bool,
 ) -> int:
     # mpv starts right away and streamlink pipes the stream into it, so the
     # window (with chat and a loading message) appears while streamlink is
-    # still talking to Twitch or skipping a pre-roll ad.
+    # still talking to Twitch or skipping a pre-roll ad. A muted stream keeps
+    # its volume, so unmuting brings it back at that level.
     player = [
         mpv,
         "--force-window=immediate",
         f"--volume={volume}",
+        f"--mute={'yes' if muted else 'no'}",
         f"--force-media-title={media_title}",
     ]
     # The chat relay always runs because it also handles `End` (jump to live);
@@ -371,7 +583,7 @@ def play(
     # streamlink's log goes to a file: a pipe nobody reads could fill up and
     # stall a long stream.
     log_path = runtime_path(f"twitch-follows-{login}.log")
-    chat_tab = None
+    joined = None
     try:
         with open(log_path, "w") as log:
             source = subprocess.Popen(
@@ -394,10 +606,19 @@ def play(
             )
             assert source.stdout is not None
             source.stdout.close()
-            chat_tab = open_chat_tab(login, viewer)
+            joined = join_group(login, viewer, group_id)
             # Whichever exits first decides: mpv closed by the user is normal,
-            # streamlink ending first means the stream failed or ended.
+            # streamlink ending first means the stream failed or ended. The
+            # group's streams close with its chat window.
+            closed_with_chat = False
             while viewer.poll() is None and source.poll() is None:
+                if joined[1]:
+                    joined[1].poll()  # reaps it, so a closed chat isn't a zombie
+                if chat_closed(joined[0]["id"]):
+                    closed_with_chat = True
+                    viewer.terminate()
+                    viewer.wait()
+                    break
                 time.sleep(0.2)
             source_ended_first = viewer.poll() is None
             if source_ended_first:
@@ -407,13 +628,16 @@ def play(
             source.wait()
             # Both can be gone by the same poll: mpv exits 2 when it got no
             # video, but 0 when the user quit it.
-            stream_failed = source.returncode != 0 and (
-                source_ended_first or viewer.returncode != 0
+            stream_failed = (
+                not closed_with_chat
+                and source.returncode != 0
+                and (source_ended_first or viewer.returncode != 0)
             )
     finally:
-        # The chat tab belongs to the stream: closing the stream closes it.
-        if chat_tab:
-            close_chat_tab(*chat_tab)
+        # The stream's chat tab closes with it, and the chat window with the
+        # group's last stream.
+        if joined:
+            leave_group(login, *joined)
         overlay.terminate()
         overlay.wait()
         ipc_path.unlink(missing_ok=True)
@@ -433,7 +657,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     group.add_argument(
         "--watch",
         metavar="LOGIN",
-        help="play a channel in mpv, tabbed with its chat in Chatterino",
+        help="play a channel in mpv, grouped with its chat in Chatterino",
     )
     parser.add_argument(
         "--quality", default="best", help="streamlink quality for --watch"
@@ -451,6 +675,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-chat-overlay",
         action="store_true",
         help="start the --watch player with chat hidden",
+    )
+    parser.add_argument(
+        "--group",
+        default="",
+        metavar="ID",
+        help="join this viewing group for --watch instead of starting a new one",
+    )
+    parser.add_argument(
+        "--muted",
+        action="store_true",
+        help="start the --watch player muted, keeping --volume for unmuting",
     )
     return parser.parse_args(argv)
 
@@ -470,8 +705,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     quality = args.quality if QUALITY_PATTERN.match(args.quality) else "best"
     volume = min(max(args.volume, 0), 100)
+    group_id = args.group if GROUP_ID_PATTERN.match(args.group) else ""
     return watch(
-        login.lower(), quality, not args.no_chat_overlay, volume, args.media_title[:200]
+        login.lower(),
+        quality,
+        not args.no_chat_overlay,
+        volume,
+        args.media_title[:200],
+        group_id,
+        args.muted,
     )
 
 

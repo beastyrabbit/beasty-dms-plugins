@@ -51,7 +51,7 @@ PluginSettings {
         settingKey: "volume"
         label: "Starting volume"
         description: "mpv volume when a stream opens."
-        defaultValue: "25"
+        defaultValue: "30"
         options: [{
             "label": "0% (muted)",
             "value": "0"
@@ -59,8 +59,8 @@ PluginSettings {
             "label": "10%",
             "value": "10"
         }, {
-            "label": "25% (default)",
-            "value": "25"
+            "label": "30% (default)",
+            "value": "30"
         }, {
             "label": "50%",
             "value": "50"
