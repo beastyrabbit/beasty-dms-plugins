@@ -436,28 +436,39 @@ def join_group(
                 stderr=subprocess.DEVNULL,
             )
         if hyprctl:
-            deadline = time.monotonic() + CHAT_WINDOW_WAIT_SECONDS
-            while viewer.poll() is None:
-                clients = hypr_clients(hyprctl)
-                stream["window"] = next(
-                    (c["address"] for c in clients if c.get("pid") == viewer.pid), ""
-                )
-                chats = chatterino_windows(clients)
-                new_chat = min(chats - before, default="")
-                if new_chat:
-                    group["chat"] = new_chat
-                    group["chatPid"] = next(
-                        c.get("pid", 0) for c in clients if c["address"] == new_chat
-                    )
-                chat_done = chat is None or chat.poll() is not None
-                if stream["window"] and (group["chat"] in chats or chat_done):
-                    break
-                if time.monotonic() > deadline:
-                    break
-                time.sleep(0.1)
+            find_windows(hyprctl, viewer, chat, group, stream, before)
             save_groups(groups)
             arrange(hyprctl, group, focus=stream["window"])
     return group, chat
+
+
+def find_windows(
+    hyprctl: str,
+    viewer: subprocess.Popen,
+    chat: subprocess.Popen | None,
+    group: dict[str, Any],
+    stream: dict[str, Any],
+    before: set[str],
+) -> None:
+    """Records the stream's window and, when one appears, a new chat window
+    (any Chatterino window that was not open before the launch)."""
+    deadline = time.monotonic() + CHAT_WINDOW_WAIT_SECONDS
+    while viewer.poll() is None and time.monotonic() <= deadline:
+        clients = hypr_clients(hyprctl)
+        stream["window"] = next(
+            (c["address"] for c in clients if c.get("pid") == viewer.pid), ""
+        )
+        chats = chatterino_windows(clients)
+        new_chat = min(chats - before, default="")
+        if new_chat:
+            group["chat"] = new_chat
+            group["chatPid"] = next(
+                c.get("pid", 0) for c in clients if c["address"] == new_chat
+            )
+        chat_done = chat is None or chat.poll() is not None
+        if stream["window"] and (group["chat"] in chats or chat_done):
+            return
+        time.sleep(0.1)
 
 
 def chat_closed(group_id: str) -> bool:
@@ -542,6 +553,25 @@ def watch(
         )
 
 
+def wait_while_playing(
+    viewer: subprocess.Popen,
+    source: subprocess.Popen,
+    group: dict[str, Any],
+    chat: subprocess.Popen | None,
+) -> bool:
+    """Waits until mpv or streamlink exits. The group's streams close with its
+    chat window: returns True when that closed mpv."""
+    while viewer.poll() is None and source.poll() is None:
+        if chat:
+            chat.poll()  # reaps it, so a closed chat isn't a zombie
+        if chat_closed(group["id"]):
+            viewer.terminate()
+            viewer.wait()
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def play(
     streamlink: str,
     mpv: str,
@@ -608,18 +638,8 @@ def play(
             source.stdout.close()
             joined = join_group(login, viewer, group_id)
             # Whichever exits first decides: mpv closed by the user is normal,
-            # streamlink ending first means the stream failed or ended. The
-            # group's streams close with its chat window.
-            closed_with_chat = False
-            while viewer.poll() is None and source.poll() is None:
-                if joined[1]:
-                    joined[1].poll()  # reaps it, so a closed chat isn't a zombie
-                if chat_closed(joined[0]["id"]):
-                    closed_with_chat = True
-                    viewer.terminate()
-                    viewer.wait()
-                    break
-                time.sleep(0.2)
+            # streamlink ending first means the stream failed or ended.
+            closed_with_chat = wait_while_playing(viewer, source, *joined)
             source_ended_first = viewer.poll() is None
             if source_ended_first:
                 viewer.wait()
