@@ -100,6 +100,17 @@ class PolicyTests(unittest.TestCase):
         policy.tick(24)
         self.assertEqual(policy.target(), "720p60")
 
+    def test_buffering_that_goes_on_after_a_step_down_still_counts(self) -> None:
+        policy = self.auto()
+        policy.buffering(True, 20)
+        policy.tick(24)
+        self.assertEqual(policy.target(), "720p60")
+        policy.loaded("720p60", 25)
+        policy.tick(25 + GRACE + 2)
+        self.assertEqual(policy.target(), "720p60")
+        policy.tick(25 + GRACE + 3)
+        self.assertEqual(policy.target(), "480p30")
+
     def test_buffering_right_after_loading_is_ignored(self) -> None:
         policy = self.auto()
         stall(policy, 1, GRACE - 2)
@@ -124,6 +135,7 @@ class PolicyTests(unittest.TestCase):
         policy = self.auto()
         policy.buffering(True, 20)
         policy.tick(24)
+        policy.buffering(False, 26)
         policy.loaded("720p60", 27)
         policy.tick(27 + stream_quality.STABLE_SECONDS - 1)
         self.assertEqual(policy.target(), "720p60")
@@ -369,6 +381,17 @@ class RelayTests(unittest.TestCase):
         old_in.close()
         new_in.close()
 
+    def test_a_spliced_source_can_no_longer_be_withdrawn(self) -> None:
+        old, _ = self.pipe_source("1080p60")
+        new, _ = self.pipe_source("480p30")
+        relay = stream_quality.Relay(Collector(), old)
+        relay.offer(new)
+        relay.queue = [(12, segment(12, b"A"))]
+        relay.hold([(12, segment(12, b"B"))])
+        relay.advance(0)
+        self.assertFalse(relay.withdraw(new))
+        self.assertIs(relay.current, new)
+
     def test_mpv_closing_ends_the_relay_without_the_stream_ending(self) -> None:
         old, old_in = self.pipe_source("1080p60")
         output = Collector()
@@ -510,6 +533,40 @@ class SwitcherTests(unittest.TestCase):
         self.assertEqual(len(self.started), 1)
         self.switcher.update(2 + stream_quality.RETRY_SECONDS)
         self.assertEqual(len(self.started), 2)
+
+    def test_video_after_audio_waits_past_the_timeout_for_mpv_to_catch_up(
+        self,
+    ) -> None:
+        self.switcher.policy.set_audio(True)
+        self.switcher.update(1)
+        self.splice(2)
+        self.switcher.policy.set_audio(False)
+        self.switcher.update(3)
+        self.relay.awaiting_release = True
+        self.switcher.update(3 + 2 * stream_quality.SWITCH_TIMEOUT_SECONDS)
+        self.relay.withdraw.assert_not_called()
+        self.assertIs(self.switcher.pending, self.started[-1])
+
+    def test_a_cancel_that_loses_to_a_splice_leaves_the_new_source_playing(
+        self,
+    ) -> None:
+        self.switcher.policy.set_audio(True)
+        self.switcher.update(1)
+        self.relay.withdraw.return_value = False
+        self.switcher.policy.set_audio(False)
+        self.switcher.update(2)
+        self.started[0].process.kill.assert_not_called()
+        old = self.splice(3)
+        old.process.kill.assert_called_once()
+
+    def test_closing_stops_the_source_a_last_splice_replaced(self) -> None:
+        self.switcher.policy.set_audio(True)
+        self.switcher.update(1)
+        self.relay.withdraw.return_value = False
+        self.relay.take_spliced.return_value = (self.started[0], self.first)
+        self.switcher.close()
+        self.first.process.kill.assert_called_once()
+        self.started[0].process.kill.assert_not_called()
 
     def test_changing_mind_mid_switch_cancels_it(self) -> None:
         self.switcher.policy.set_audio(True)

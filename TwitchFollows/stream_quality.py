@@ -247,7 +247,10 @@ class QualityPolicy:
     def reset(self, now: float) -> None:
         self.loaded_at = now
         self.stalls = []
-        self.stall_start = None
+        # mpv only reports changes, so buffering that goes on counts again
+        # once the grace period is over.
+        if self.stall_start is not None:
+            self.stall_start = now + GRACE_SECONDS
 
     def buffering(self, active: bool, now: float) -> None:
         if active and self.stall_start is None:
@@ -385,12 +388,15 @@ class Relay:
         with self.lock:
             self.released = True
 
-    def withdraw(self) -> None:
+    def withdraw(self, source: Source) -> bool:
+        """Drops a pending source; False if it has been spliced in already."""
         with self.lock:
-            if self.pending:
-                self.segmenters.pop(id(self.pending), None)
+            if self.pending is not source:
+                return False
+            self.segmenters.pop(id(source), None)
             self.pending = None
             self.segments = []
+            return True
 
     def take_spliced(self) -> tuple[Source, Source] | None:
         with self.lock:
@@ -673,16 +679,15 @@ class Switcher:
             self.show(label(new.quality))
         elif pending.quality != self.policy.target():
             # Asked for something else meanwhile; the next step starts that.
-            self.relay.withdraw()
-            pending.stop()
-            self.pending = None
-        elif (
-            pending.process.poll() is not None
-            or now - pending.started > SWITCH_TIMEOUT_SECONDS
+            self.drop_pending()
+        elif pending.process.poll() is not None or (
+            # Video after audio may wait longer for mpv to play out its audio,
+            # which takes as long as playback is behind.
+            now - pending.started > SWITCH_TIMEOUT_SECONDS
+            and not self.relay.awaiting_release
         ):
-            self.relay.withdraw()
-            pending.stop()
-            self.pending = None
+            if not self.drop_pending():
+                return
             self.retry_at = now + RETRY_SECONDS
             self.policy.switch_failed()
             self.show(f"Couldn't switch to {label(pending.quality)}")
@@ -691,6 +696,15 @@ class Switcher:
             self.mpv.send(
                 ["get_property", "demuxer-cache-duration"], BUFFERED_REQUEST_ID
             )
+
+    def drop_pending(self) -> bool:
+        """Stops the pending source, unless the relay has just spliced it in;
+        the next step then finds that splice."""
+        if not self.relay.withdraw(self.pending):
+            return False
+        self.pending.stop()
+        self.pending = None
+        return True
 
     def turn_video_off(self) -> None:
         """mpv would wait for pictures that audio segments don't have, so
@@ -774,9 +788,11 @@ class Switcher:
     def close(self) -> None:
         """Stops a switch still under way and removes the still."""
         if self.pending:
-            self.relay.withdraw()
-            self.pending.stop()
-            self.pending = None
+            self.drop_pending()
+        # A splice the last step didn't see leaves its old source running.
+        spliced = self.relay.take_spliced()
+        if spliced:
+            spliced[1].stop()
         if self.mpv:
             self.mpv.sock.close()
             self.mpv = None
