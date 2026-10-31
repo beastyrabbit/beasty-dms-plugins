@@ -236,7 +236,7 @@ class AvatarCacheTests(unittest.TestCase):
 
 class ChatSyncTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.sync = twitch_follows.ChatSync(Path("unused.sock"), "0123abcd")
+        self.sync = twitch_follows.ChatSync(Path("unused.sock"), "0123abcd", False)
         self.mpv = MagicMock()
         self.mpv.events.return_value = []
         self.sync.mpv = self.mpv
@@ -276,6 +276,11 @@ class ChatSyncTests(unittest.TestCase):
         self.step(False, "yes")
         self.set_chat_mode.assert_called_once_with("0123abcd", True)
         self.step(True)
+        self.assertEqual(self.sent(), [])
+
+    def test_a_press_before_the_first_report_still_switches_the_group(self) -> None:
+        self.step(False, "yes")
+        self.set_chat_mode.assert_called_once_with("0123abcd", True)
         self.assertEqual(self.sent(), [])
 
     def test_another_streams_button_switches_this_one(self) -> None:

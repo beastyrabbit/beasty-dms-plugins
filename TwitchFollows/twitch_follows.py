@@ -621,14 +621,16 @@ class ChatSync:
     group's streams switches the whole group: that stream sets the group's
     mode, and the other streams follow it."""
 
-    def __init__(self, ipc_path: Path, group_id: str) -> None:
+    def __init__(self, ipc_path: Path, group_id: str, started_in_mpv: bool) -> None:
         self.ipc_path = ipc_path
         self.group_id = group_id
         self.mpv = None
         # What this mpv shows, the group mode it last agreed with, and a
-        # value set here that mpv hasn't reported back yet.
+        # value set here that mpv hasn't reported back yet. The overlay
+        # started with started_in_mpv, so a button pressed before this
+        # connects still counts as a press.
         self.shown: bool | None = None
-        self.synced: bool | None = None
+        self.synced = started_in_mpv
         self.expected: bool | None = None
 
     def step(self, group: dict[str, Any] | None) -> None:
@@ -855,7 +857,7 @@ def play(
         )
         switcher = stream_quality.Switcher(streamlink, login, ipc_path, policy, relay)
         joined = join_group(login, viewer, group_id, chat_in_mpv)
-        chat_sync = ChatSync(ipc_path, joined[0]["id"])
+        chat_sync = ChatSync(ipc_path, joined[0]["id"], chat_in_mpv)
         # Whichever ends first decides: mpv closed by the user is normal, the
         # stream ending first means it failed or ended. After a quality
         # switch, that is the streamlink switched to.
