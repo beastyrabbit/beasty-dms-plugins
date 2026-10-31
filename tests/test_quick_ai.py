@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 from contextlib import redirect_stderr
@@ -74,6 +75,11 @@ class FastRequestTests(unittest.TestCase):
         self.assertEqual(body["provider"], {"sort": "latency"})
         self.assertEqual(body["tools"][0]["type"], "openrouter:web_search")
         self.assertNotIn("response_format", body)
+
+    def test_models_that_require_thinking_use_low_when_off(self) -> None:
+        for model in quick_ai.THINKING_REQUIRED:
+            body = quick_ai.fast_request("ask", "prompt", model, "off")
+            self.assertEqual(body["reasoning"], {"effort": "low"})
 
     def test_thinking_level_is_passed_as_effort(self) -> None:
         body = quick_ai.fast_request("ask", "prompt", "z-ai/glm-5.3-flash", "low")
@@ -216,6 +222,13 @@ class FastResponseTests(unittest.TestCase):
                 result = quick_ai.execute("ask", "Question", "auto")
                 self.assertEqual(result["code"], code)
 
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_overall_deadline_stops_a_trickling_response(self, urlopen) -> None:
+        urlopen.side_effect = lambda *_args, **_kwargs: time.sleep(3)
+        with patch.object(quick_ai, "FAST_TIMEOUT_SECONDS", 1):
+            result = quick_ai.execute("ask", "Question", "auto")
+        self.assertEqual(result["code"], "timeout")
+
     def test_missing_key_is_friendly(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             result = quick_ai.execute("ask", "Question", "auto")
@@ -346,6 +359,15 @@ class ArgumentTests(unittest.TestCase):
         self.assertTrue(args.clipboard)
         self.assertIsNone(args.query)
 
+    def test_stdin_query_is_read_and_validated(self) -> None:
+        with patch.object(quick_ai.sys, "stdin", io.StringIO("  Saved text  ")):
+            args = quick_ai.parse_args(["--mode", "summarize", "--stdin"])
+        self.assertEqual(args.query, "Saved text")
+
+    def test_stdin_and_query_are_exclusive(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            quick_ai.parse_args(["--mode", "ask", "--stdin", "--query", "x"])
+
     def test_clipboard_is_rejected_for_ask(self) -> None:
         with redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
@@ -358,6 +380,17 @@ class ArgumentTests(unittest.TestCase):
 
 
 class ClipboardTests(unittest.TestCase):
+    @patch.object(quick_ai, "execute")
+    @patch.object(quick_ai, "read_clipboard_text", return_value=("Clip", None))
+    def test_clipboard_result_returns_the_text_for_better_answer(
+        self, _read, execute
+    ) -> None:
+        execute.return_value = {"ok": True, "mode": "summarize", "answer": "Sum"}
+        output = io.StringIO()
+        with patch.object(quick_ai.sys, "stdout", output):
+            quick_ai.main(["--mode", "summarize", "--clipboard"])
+        self.assertEqual(json.loads(output.getvalue())["input"], "Clip")
+
     @patch.object(quick_ai, "resolve_wl_paste", return_value="/usr/bin/wl-paste")
     @patch.object(quick_ai.subprocess, "run")
     def test_reads_plain_text_clipboard(self, run, _resolve) -> None:
@@ -408,16 +441,27 @@ class DmsProcessIntegrationTests(unittest.TestCase):
             f"http://127.0.0.1:{server.server_port}/api/v1"
         )
         # DMS keeps the helper's stdin open; the helper must not wait on it.
-        process = quick_ai.subprocess.run(
+        process = quick_ai.subprocess.Popen(
             [sys.executable, str(MODULE_PATH), "--mode", "ask", "--query", "Question"],
             stdin=quick_ai.subprocess.PIPE,
-            capture_output=True,
+            stdout=quick_ai.subprocess.PIPE,
+            stderr=quick_ai.subprocess.PIPE,
             text=True,
             env=environment,
-            timeout=4,
         )
-        self.assertEqual(process.returncode, 0)
-        self.assertEqual(json.loads(process.stdout)["answer"], "A short answer")
+        try:
+            return_code = process.wait(timeout=4)
+        except quick_ai.subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+            self.fail("helper waited on DMS's open stdin pipe")
+        finally:
+            output = process.stdout.read() if process.stdout else ""
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream:
+                    stream.close()
+        self.assertEqual(return_code, 0)
+        self.assertEqual(json.loads(output)["answer"], "A short answer")
 
 
 if __name__ == "__main__":

@@ -44,7 +44,7 @@ PluginSettings {
     SelectionSetting {
         settingKey: "thinking"
         label: "Thinking level"
-        description: "How long the model reasons before answering. Higher levels are slower. GLM and Gemini Flash-Lite cannot turn thinking off."
+        description: "How long the model reasons before answering. Higher levels are slower. GLM and Gemini Flash-Lite cannot turn thinking off and use Low instead."
         defaultValue: "off"
         options: [{
             "label": "Off (default)",

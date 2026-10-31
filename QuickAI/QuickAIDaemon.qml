@@ -26,6 +26,7 @@ PluginComponent {
     property var activeProcess: null
     property bool autoRunOnOpen: false
     property bool clipboardSource: false
+    property string clipboardText: ""
     property bool better: false
     property double lastNonce: -1
     readonly property string helperPath: Paths.strip(Qt.resolvedUrl("quick_ai.py"))
@@ -102,6 +103,7 @@ PluginComponent {
         cancelRequest();
         mode = requestedMode;
         clipboardSource = requestedClipboard;
+        clipboardText = "";
         better = false;
         targetLanguage = "auto";
         inputText = requestedClipboard ? "" : text;
@@ -153,12 +155,18 @@ PluginComponent {
         const arguments = ["python3", helperPath, "--model", setting("fastModel"), "--effort", setting("thinking"), "--mode", request.mode, "--target", request.target];
         if (request.better)
             arguments.push("--better");
-        if (request.clipboard)
+        let input = null;
+        if (request.clipboard && clipboardText) {
+            arguments.push("--stdin");
+            input = clipboardText;
+        } else if (request.clipboard) {
             arguments.push("--clipboard");
-        else
+        } else {
             arguments.push("--query", request.query);
+        }
         activeProcess = requestProcess.createObject(root, {
             "requestGeneration": request.generation,
+            "input": input,
             "command": arguments
         });
         activeProcess.running = true;
@@ -202,6 +210,9 @@ PluginComponent {
             return ;
         }
         elapsedMs = payload.elapsedMs || 0;
+        if (payload.input)
+            clipboardText = payload.input;
+
         if (!payload.ok) {
             status = payload.code === "cancelled" ? "idle" : "error";
             errorMessage = payload.message || "Quick AI could not complete the request.";
@@ -243,6 +254,7 @@ PluginComponent {
         elapsedMs = 0;
         elapsedSeconds = 0;
         clipboardSource = false;
+        clipboardText = "";
         better = false;
     }
 
@@ -282,7 +294,15 @@ PluginComponent {
             id: process
 
             property int requestGeneration: 0
+            property var input: null
 
+            stdinEnabled: input !== null
+            onStarted: {
+                if (input !== null) {
+                    write(input);
+                    stdinEnabled = false;
+                }
+            }
             onExited: (exitCode) => {
                 root.processFinished(requestGeneration, exitCode, stdoutCollector.text, stderrCollector.text);
                 destroy();

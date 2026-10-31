@@ -12,7 +12,9 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import time
 import tomllib
 import urllib.error
@@ -34,6 +36,8 @@ FAST_MODELS = (
 )
 EFFORTS = ("off", "low", "medium", "high")
 DEFAULT_EFFORT = "off"
+# These reject reasoning {enabled: false}; "off" runs them at "low" instead.
+THINKING_REQUIRED = ("z-ai/glm-5.3-flash", "google/gemini-3.5-flash-lite")
 BETTER_MODEL = "gpt-6.1-sol"
 BETTER_EFFORT = "medium"
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
@@ -168,6 +172,8 @@ def openrouter_base() -> str:
 
 def fast_request(mode: str, prompt: str, model: str, effort: str) -> dict[str, Any]:
     """OpenRouter chat completions body for the fast path."""
+    if effort == "off" and model in THINKING_REQUIRED:
+        effort = "low"
     body: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -247,7 +253,24 @@ def friendly_http_error(status: int, details: str, service: str) -> RequestError
     return RequestError("http", f"{service} could not complete the request. Try again.")
 
 
+def _deadline_reached(_signum: int, _frame: Any) -> None:
+    raise TimeoutError
+
+
 def post_json(
+    url: str, body: dict[str, Any], token: str, timeout: int, service: str
+) -> dict[str, Any]:
+    # urlopen's timeout only bounds socket inactivity; the alarm bounds the
+    # whole request so a trickling response cannot keep the popup loading.
+    signal.signal(signal.SIGALRM, _deadline_reached)
+    signal.alarm(timeout)
+    try:
+        return _post_json(url, body, token, timeout, service)
+    finally:
+        signal.alarm(0)
+
+
+def _post_json(
     url: str, body: dict[str, Any], token: str, timeout: int, service: str
 ) -> dict[str, Any]:
     request = urllib.request.Request(
@@ -412,6 +435,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target", choices=("auto", "en", "de"), default="auto")
     parser.add_argument("--query")
     parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="read the query from stdin (keeps clipboard text out of arguments)",
+    )
+    parser.add_argument(
         "--clipboard",
         action="store_true",
         help="summarize the current plain-text Wayland clipboard",
@@ -428,6 +456,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--mode is required unless --check is used")
     if args.clipboard and args.mode != "summarize":
         parser.error("--clipboard is only valid with --mode summarize")
+    if sum((args.clipboard, args.stdin, args.query is not None)) > 1:
+        parser.error("use only one of --query, --stdin, and --clipboard")
+    if args.stdin:
+        args.query = sys.stdin.read()
     if not args.clipboard and args.query is None:
         parser.error("--query is required unless --check or --clipboard is used")
     if args.clipboard:
@@ -491,19 +523,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         args.query = clipboard_text
-    print(
-        json.dumps(
-            execute(
-                args.mode,
-                args.query,
-                args.target,
-                args.model,
-                args.effort,
-                args.better,
-            ),
-            ensure_ascii=False,
-        )
+    result = execute(
+        args.mode, args.query, args.target, args.model, args.effort, args.better
     )
+    if args.clipboard:
+        # Better answer resends this text over stdin instead of rereading a
+        # clipboard that may have changed (for example after Copy).
+        result["input"] = clipboard_text
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
