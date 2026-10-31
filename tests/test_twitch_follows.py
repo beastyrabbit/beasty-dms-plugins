@@ -663,6 +663,16 @@ print(json.dumps(clients))
         self.assertIn('{ window = "address:0xb2", size = 25 }', arranged)
         self.assertIn(' }, "0xc3"\n', arranged)  # focus
 
+    def test_chatterino_returns_to_a_named_workspace_with_quotes(self) -> None:
+        clients = [{"address": "0xc3", "workspace": {"id": -1337, "name": 'chat"rööm'}}]
+        group = {"chat": "0xb2", "streams": [{"window": "0xc3"}]}
+        with (
+            patch.object(twitch_follows, "hypr_clients", return_value=clients),
+            patch.object(twitch_follows.subprocess, "run") as run,
+        ):
+            twitch_follows.show_chat("hyprctl", group)
+        self.assertIn('workspace = "name:chat\\"rööm",', run.call_args.args[0][2])
+
     def test_joining_a_group_with_chat_in_mpv_keeps_chatterino_out(self) -> None:
         bin_dir = self.fake_tools(
             "printf video", f'echo $$ > "{self.runtime}/mpv.pid"; sleep 1; cat'

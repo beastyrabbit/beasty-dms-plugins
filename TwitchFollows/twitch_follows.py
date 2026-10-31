@@ -317,7 +317,7 @@ hl.dispatch(hl.dsp.window.move({ workspace = "WORKSPACE", window = sel, follow =
 return "ok"
 """
 SHOW_CHAT_LUA = """
-hl.dispatch(hl.dsp.window.move({ workspace = "WORKSPACE", window = "address:CHAT", follow = false }))
+hl.dispatch(hl.dsp.window.move({ workspace = WORKSPACE, window = "address:CHAT", follow = false }))
 return "ok"
 """
 
@@ -453,7 +453,8 @@ def lua_value(value: Any) -> str:
     if isinstance(value, list):
         return "{ " + ", ".join(lua_value(v) for v in value) + " }"
     if isinstance(value, str):
-        return json.dumps(value)
+        # Lua reads UTF-8 as is, but not JSON's \u escapes.
+        return json.dumps(value, ensure_ascii=False)
     return str(value)
 
 
@@ -587,7 +588,9 @@ def show_chat(hyprctl: str, group: dict[str, Any]) -> str:
         target = name
     else:
         target = f"name:{name}"
-    lua = SHOW_CHAT_LUA.replace("CHAT", group["chat"]).replace("WORKSPACE", target)
+    lua = SHOW_CHAT_LUA.replace("CHAT", group["chat"]).replace(
+        "WORKSPACE", lua_value(target)
+    )
     subprocess.run([hyprctl, "repl", lua], capture_output=True, check=False)
     return stream
 
