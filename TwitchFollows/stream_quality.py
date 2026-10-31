@@ -682,9 +682,10 @@ class Switcher:
             self.drop_pending()
         elif pending.process.poll() is not None or (
             # Video after audio may wait longer for mpv to play out its audio,
-            # which takes as long as playback is behind.
+            # which takes as long as playback is behind, and once released it
+            # is spliced in at once.
             now - pending.started > SWITCH_TIMEOUT_SECONDS
-            and not self.relay.awaiting_release
+            and not (self.relay.awaiting_release or self.relay.released)
         ):
             if not self.drop_pending():
                 return

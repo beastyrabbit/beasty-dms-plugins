@@ -415,6 +415,7 @@ class SwitcherTests(unittest.TestCase):
         self.relay.current = self.first
         self.relay.take_spliced.return_value = None
         self.relay.awaiting_release = False
+        self.relay.released = False
         policy = stream_quality.QualityPolicy(BEST, audio_only=False)
         self.switcher = stream_quality.Switcher(
             "streamlink", "big", self.dir / "mpv.sock", policy, self.relay
@@ -544,6 +545,11 @@ class SwitcherTests(unittest.TestCase):
         self.switcher.update(3)
         self.relay.awaiting_release = True
         self.switcher.update(3 + 2 * stream_quality.SWITCH_TIMEOUT_SECONDS)
+        self.relay.withdraw.assert_not_called()
+        self.assertIs(self.switcher.pending, self.started[-1])
+        # Released, it no longer waits, but it isn't spliced in yet either.
+        self.relay.awaiting_release, self.relay.released = False, True
+        self.switcher.update(4 + 2 * stream_quality.SWITCH_TIMEOUT_SECONDS)
         self.relay.withdraw.assert_not_called()
         self.assertIs(self.switcher.pending, self.started[-1])
 
