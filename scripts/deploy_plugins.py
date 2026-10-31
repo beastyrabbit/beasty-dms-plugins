@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,10 @@ from plugin_doctor import (
     plugin_dir,
     repository_errors,
     repository_root,
+)
+
+RELEASE_NAME = re.compile(
+    r"^\d{8}-\d{6}-(?P<revision>[0-9a-f]+)(?P<dirty>-dirty)?-[0-9a-f]{8}$"
 )
 
 
@@ -39,6 +44,69 @@ def git_output(root: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
+def new_release_name(revision: str, dirty: bool) -> str:
+    suffix = "-dirty" if dirty else ""
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{revision}{suffix}-{uuid.uuid4().hex[:8]}"
+
+
+def plugin_files(path: Path) -> dict[Path, bytes]:
+    if not path.is_dir():
+        return {}
+    return {
+        file.relative_to(path): file.read_bytes()
+        for file in path.rglob("*")
+        if file.is_file() and "__pycache__" not in file.parts and file.suffix != ".pyc"
+    }
+
+
+def changed_plugins(root: Path, live: Path, directories: list[str]) -> list[str]:
+    return [
+        directory
+        for directory in directories
+        if plugin_files(root / directory) != plugin_files(live / directory)
+    ]
+
+
+def live_conflict(root: Path, release_name: str) -> str | None:
+    """Explain why HEAD may not contain the live release, or return None."""
+    match = RELEASE_NAME.match(release_name)
+    if match is None:
+        return "its name records no revision"
+    if match["dirty"]:
+        return "it was deployed with uncommitted changes"
+    revision = match["revision"]
+    ancestor = command(
+        "git", "-C", str(root), "merge-base", "--is-ancestor", revision, "HEAD"
+    )
+    if ancestor.returncode != 0:
+        return f"its revision {revision} is not part of HEAD"
+    return None
+
+
+def may_replace_live(
+    root: Path, current: Path, directories: list[str], replace_live: bool
+) -> bool:
+    """Print what this deploy changes and refuse to drop work HEAD lacks."""
+    if not current.is_symlink():
+        return True
+    live = current.parent / os.readlink(current)
+    changed = changed_plugins(root, live, directories)
+    print(
+        f"Live release {live.name}; this deploy changes: "
+        + (", ".join(changed) or "no plugin files")
+    )
+    conflict = live_conflict(root, live.name)
+    if conflict is None or replace_live:
+        return True
+    print(
+        f"Refusing to replace live release {live.name}: {conflict}. It may hold "
+        "another thread's unmerged preview, which this deploy would remove. Rerun "
+        "with --replace-live once that work is merged or its owner agrees.",
+        file=sys.stderr,
+    )
+    return False
+
+
 def replace_symlink(path: Path, target: Path | str) -> None:
     temporary = path.with_name(f".{path.name}.new-{uuid.uuid4().hex}")
     os.symlink(str(target), temporary, target_is_directory=True)
@@ -51,6 +119,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--allow-dirty",
         action="store_true",
         help="deploy tracked working-tree modifications (intended only for migration)",
+    )
+    parser.add_argument(
+        "--replace-live",
+        action="store_true",
+        help="replace a live release that HEAD does not contain, such as a preview",
     )
     parser.add_argument(
         "--no-restart", action="store_true", help="deploy without restarting DMS"
@@ -100,17 +173,15 @@ def main(argv: list[str] | None = None) -> int:
             Path.home() / ".local" / "share" / "dms-plugins" / "beasty-dms-plugins",
         )
     ).expanduser()
+    current = deployment_root / "current"
+    if not may_replace_live(root, current, plugin_paths, args.replace_live):
+        return 1
     dms_plugin_dir.mkdir(parents=True, exist_ok=True)
     deployment_root.mkdir(parents=True, exist_ok=True)
 
     revision = git_output(root, "rev-parse", "--short=12", "HEAD")
-    suffix = "-dirty" if dirty else ""
-    release_name = (
-        f"{time.strftime('%Y%m%d-%H%M%S')}-{revision}{suffix}-{uuid.uuid4().hex[:8]}"
-    )
-    release = deployment_root / release_name
+    release = deployment_root / new_release_name(revision, bool(dirty))
     staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=deployment_root))
-    current = deployment_root / "current"
     old_current = os.readlink(current) if current.is_symlink() else None
     old_links = {
         plugin.directory: os.readlink(dms_plugin_dir / plugin.directory)

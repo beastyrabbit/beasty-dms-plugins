@@ -53,7 +53,7 @@ Use the guarded deployment command instead of manually changing plugin symlinks 
 python3 scripts/deploy_plugins.py
 ```
 
-It validates every inventory entry and referenced component, rejects untracked plugin files and disposable worktrees, updates all plugin links atomically, restarts DMS, and verifies that every expected plugin ID is discovered. Diagnose the repository and live deployment without changing anything using:
+It validates every inventory entry and referenced component, rejects untracked plugin files and disposable worktrees, updates all plugin links atomically, restarts DMS, and verifies that every expected plugin ID is discovered. Before it replaces anything, it lists the plugins whose files differ from the live release. It refuses to replace a live release that `HEAD` does not contain, such as an unmerged preview or a deploy with uncommitted changes; pass `--replace-live` once that work is merged or its owner agrees. Diagnose the repository and live deployment without changing anything using:
 
 ```bash
 python3 scripts/plugin_doctor.py
