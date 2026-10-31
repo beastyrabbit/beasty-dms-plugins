@@ -44,6 +44,11 @@ def git_output(root: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
+def new_release_name(revision: str, dirty: bool) -> str:
+    suffix = "-dirty" if dirty else ""
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{revision}{suffix}-{uuid.uuid4().hex[:8]}"
+
+
 def plugin_files(path: Path) -> dict[Path, bytes]:
     if not path.is_dir():
         return {}
@@ -76,6 +81,30 @@ def live_conflict(root: Path, release_name: str) -> str | None:
     if ancestor.returncode != 0:
         return f"its revision {revision} is not part of HEAD"
     return None
+
+
+def may_replace_live(
+    root: Path, current: Path, directories: list[str], replace_live: bool
+) -> bool:
+    """Print what this deploy changes and refuse to drop work HEAD lacks."""
+    if not current.is_symlink():
+        return True
+    live = current.parent / os.readlink(current)
+    changed = changed_plugins(root, live, directories)
+    print(
+        f"Live release {live.name}; this deploy changes: "
+        + (", ".join(changed) or "no plugin files")
+    )
+    conflict = live_conflict(root, live.name)
+    if conflict is None or replace_live:
+        return True
+    print(
+        f"Refusing to replace live release {live.name}: {conflict}. It may hold "
+        "another thread's unmerged preview, which this deploy would remove. Rerun "
+        "with --replace-live once that work is merged or its owner agrees.",
+        file=sys.stderr,
+    )
+    return False
 
 
 def replace_symlink(path: Path, target: Path | str) -> None:
@@ -145,32 +174,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     ).expanduser()
     current = deployment_root / "current"
-    if current.is_symlink():
-        live = deployment_root / os.readlink(current)
-        changed = changed_plugins(root, live, plugin_paths)
-        print(
-            f"Live release {live.name}; this deploy changes: "
-            + (", ".join(changed) or "no plugin files")
-        )
-        conflict = live_conflict(root, live.name)
-        if conflict and not args.replace_live:
-            print(
-                f"Refusing to replace live release {live.name}: {conflict}. It may "
-                "hold another thread's unmerged preview, which this deploy would "
-                "remove. Rerun with --replace-live once that work is merged or its "
-                "owner agrees.",
-                file=sys.stderr,
-            )
-            return 1
+    if not may_replace_live(root, current, plugin_paths, args.replace_live):
+        return 1
     dms_plugin_dir.mkdir(parents=True, exist_ok=True)
     deployment_root.mkdir(parents=True, exist_ok=True)
 
     revision = git_output(root, "rev-parse", "--short=12", "HEAD")
-    suffix = "-dirty" if dirty else ""
-    release_name = (
-        f"{time.strftime('%Y%m%d-%H%M%S')}-{revision}{suffix}-{uuid.uuid4().hex[:8]}"
-    )
-    release = deployment_root / release_name
+    release = deployment_root / new_release_name(revision, bool(dirty))
     staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=deployment_root))
     old_current = os.readlink(current) if current.is_symlink() else None
     old_links = {
