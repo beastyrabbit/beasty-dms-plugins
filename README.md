@@ -26,7 +26,7 @@ Then add the **Twitch Follows** widget to DankBar. DMS Settings → Plugins → 
 
 ## Quick AI setup
 
-Quick AI uses the installed Codex CLI. It runs Codex without your user config (no MCP servers, hooks, or rules) but reuses the `model_provider` from `~/.codex/config.toml`: when that is a custom provider such as CLIProxyAPI, Quick AI sends requests there, passing the provider's bearer token to Codex through an environment variable rather than the argument list. Without a custom provider it falls back to Codex's own ChatGPT login (`codex login status`). The startup check lists the proxy's `/models` to confirm it serves Terra. It requires DMS 1.5 or newer.
+Quick AI calls OpenRouter directly and needs `OPENROUTER_API_KEY` in the DMS environment (for example from `~/.config/environment.d/`). The startup check confirms that OpenRouter accepts the key. The **Better answer** button reruns the request on `gpt-6.1-sol` with medium thinking through the CLIProxyAPI provider configured as `model_provider` in `~/.codex/config.toml`, using that provider's bearer token. It requires DMS 1.5 or newer.
 
 ```bash
 dms ipc call plugin-scan scan
@@ -35,9 +35,11 @@ dms ipc call plugins enable quickAi
 
 The `?` launcher menu always shows four actions: Quick Ask, Quick Translate, Summarize Input, and Summarize Clipboard. Ask remains the default; press ↓ to choose another action. Ask, Translate, and Summarize Input require text after `?`, while Summarize Clipboard works with an empty `?`. The popup is a read-only formatted result, includes a Copy button, and closes with Escape.
 
-All actions use the model chosen in DMS Settings → Plugins → Quick AI (default `gpt-5.6-terra`) and its thinking level (default low), at standard speed rather than Codex Fast mode. The dropdown lists the text models the proxy serves. Quick Ask allows web search when freshness matters; translation and summaries have no web access. Quick Translate automatically translates English ↔ German. Summaries stay in the source language and preserve important facts, dates, decisions, and action items.
+All actions use the OpenRouter model chosen in DMS Settings → Plugins → Quick AI (default `deepseek/deepseek-v4.1-flash`) and its thinking level (default off). Requests go to the lowest-latency provider. In Quick Ask the model can call OpenRouter's web search when freshness matters; OpenRouter bills each search on top of tokens. Translation and summaries have no web access. Quick Translate automatically translates English ↔ German. Summaries stay in the source language and preserve important facts, dates, decisions, and action items.
 
-Selecting Summarize Clipboard sends the current plain-text clipboard contents to Terra. Questions and clipboard contents are sent to Codex over stdin so they do not appear in the process argument list.
+After an answer or an error, **Better answer** asks `gpt-6.1-sol` (medium thinking, web search for Quick Ask) instead. It is slower, about 5–10 seconds. For a clipboard summary it reads the clipboard again.
+
+Selecting Summarize Clipboard sends the current plain-text clipboard contents to OpenRouter, or to CLIProxyAPI for Better answer.
 
 The DMS built-in Settings Search normally owns `?`; move its trigger to `ds` before using Quick AI.
 

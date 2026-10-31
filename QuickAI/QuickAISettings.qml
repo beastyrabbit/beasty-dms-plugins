@@ -6,47 +6,24 @@ import qs.Modules.Plugins
 PluginSettings {
     id: root
 
-    readonly property string helperPath: Paths.strip(Qt.resolvedUrl("quick_ai.py"))
-    property string defaultModel: "gpt-5.6-terra"
-    property var models: []
-    property string loadError: ""
+    readonly property string defaultModel: "deepseek/deepseek-v4.1-flash"
+    // Keep in sync with FAST_MODELS in quick_ai.py.
+    readonly property var models: ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-1017", "xiaomi/mimo-v2.6-flash", "z-ai/glm-5.3-flash", "google/gemini-3.5-flash-lite", "anthropic/claude-haiku-5.5"]
 
-    // The saved model stays selectable even if the proxy is unreachable.
+    // A saved model that left the list stays selectable.
     readonly property var modelOptions: {
         const ids = models.slice();
-        const saved = pluginService ? loadValue("model", "") : "";
-        for (const id of [defaultModel, saved]) {
-            if (id && ids.indexOf(id) === -1)
-                ids.push(id);
-        }
-        return ids.sort().map(id => ({
+        const saved = pluginService ? loadValue("fastModel", "") : "";
+        if (saved && ids.indexOf(saved) === -1)
+            ids.push(saved);
+
+        return ids.map(id => ({
                     "label": id === defaultModel ? id + " (default)" : id,
                     "value": id
                 }));
     }
 
     pluginId: "quickAi"
-
-    Component.onCompleted: {
-        Proc.runCommand("quickAi.listModels", ["python3", helperPath, "--list-models"], (output, exitCode) => {
-            let result = null;
-            try {
-                result = JSON.parse(output.trim());
-            } catch (error) {
-                result = null;
-            }
-            if (exitCode !== 0 || !result) {
-                root.loadError = "Could not list models.";
-                return ;
-            }
-            root.defaultModel = result.default || root.defaultModel;
-            if (!result.ok) {
-                root.loadError = result.message || "Could not list models.";
-                return ;
-            }
-            root.models = result.models || [];
-        });
-    }
 
     StyledText {
         width: parent.width
@@ -57,26 +34,23 @@ PluginSettings {
     }
 
     SelectionSetting {
-        settingKey: "model"
+        settingKey: "fastModel"
         label: "Model"
-        description: root.loadError || "Used for Quick Ask, Translate, and Summarize. Models come from the Codex model provider (CLIProxyAPI)."
+        description: "OpenRouter model for Quick Ask, Translate, and Summarize. Needs OPENROUTER_API_KEY in the DMS environment."
         options: root.modelOptions
         defaultValue: root.defaultModel
     }
 
     SelectionSetting {
-        settingKey: "effort"
+        settingKey: "thinking"
         label: "Thinking level"
-        description: "How long the model reasons before answering. Higher levels are slower."
-        defaultValue: "low"
+        description: "How long the model reasons before answering. Higher levels are slower. GLM and Gemini Flash-Lite cannot turn thinking off and use Low instead."
+        defaultValue: "off"
         options: [{
-            "label": "None",
-            "value": "none"
+            "label": "Off (default)",
+            "value": "off"
         }, {
-            "label": "Minimal",
-            "value": "minimal"
-        }, {
-            "label": "Low (default)",
+            "label": "Low",
             "value": "low"
         }, {
             "label": "Medium",
@@ -84,13 +58,15 @@ PluginSettings {
         }, {
             "label": "High",
             "value": "high"
-        }, {
-            "label": "Extra high",
-            "value": "xhigh"
-        }, {
-            "label": "Max",
-            "value": "max"
         }]
+    }
+
+    StyledText {
+        width: parent.width
+        text: "Better answer reruns the request on GPT-6.1 Sol with medium thinking through the CLIProxyAPI provider in ~/.codex/config.toml."
+        font.pixelSize: Theme.fontSizeSmall
+        color: Theme.surfaceTextSecondary
+        wrapMode: Text.WordWrap
     }
 
 }
