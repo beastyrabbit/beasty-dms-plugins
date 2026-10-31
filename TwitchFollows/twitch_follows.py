@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -24,6 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,10 @@ import stream_quality
 
 HELIX_URL = "https://api.twitch.tv/helix"
 REQUEST_TIMEOUT_SECONDS = 10
+# Avatars are kept on disk so the list shows them at once; the periodic list
+# refresh downloads them again once they are this old, and drops unused ones.
+AVATAR_MAX_AGE_SECONDS = 7 * 24 * 3600
+AVATAR_TIMEOUT_SECONDS = 5
 MAX_PAGES = 20
 CHATTERINO_FLATPAK_ID = "com.chatterino.chatterino"
 CHATTERINO_CLASSES = {CHATTERINO_FLATPAK_ID, "chatterino"}
@@ -223,9 +229,60 @@ def fetch_avatars(account: dict[str, str], user_ids: list[str]) -> dict[str, str
     return avatars
 
 
+def avatar_dir() -> Path:
+    cache = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
+    return Path(cache) / "twitch-follows" / "avatars"
+
+
+def cached_avatar(url: str, directory: Path, now: float) -> str:
+    """A local copy of the avatar, downloaded again once it's a week old;
+    the old copy, or the URL itself, if downloading fails."""
+    if not url.startswith("https://"):
+        return url
+    suffix = Path(urllib.parse.urlparse(url).path).suffix[:5]
+    path = directory / (hashlib.sha256(url.encode()).hexdigest()[:32] + suffix)
+    with contextlib.suppress(OSError):
+        if now - path.stat().st_mtime < AVATAR_MAX_AGE_SECONDS:
+            return path.as_uri()
+    try:
+        with urllib.request.urlopen(url, timeout=AVATAR_TIMEOUT_SECONDS) as reply:
+            data = reply.read()
+        directory.mkdir(parents=True, exist_ok=True)
+        # Renamed into place, so the list never loads a half-written file.
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.new")
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
+    except (OSError, urllib.error.URLError, TimeoutError):
+        return path.as_uri() if path.exists() else url
+    return path.as_uri()
+
+
+def cache_avatars(urls: dict[str, str]) -> dict[str, str]:
+    directory = avatar_dir()
+    now = time.time()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        local = dict(
+            zip(
+                urls,
+                pool.map(lambda url: cached_avatar(url, directory, now), urls.values()),
+            )
+        )
+    used = {Path(urllib.parse.urlparse(uri).path).name for uri in local.values()}
+    with contextlib.suppress(OSError):
+        for path in directory.iterdir():
+            if (
+                path.name not in used
+                and now - path.stat().st_mtime > AVATAR_MAX_AGE_SECONDS
+            ):
+                path.unlink(missing_ok=True)
+    return local
+
+
 def fetch_follows(account: dict[str, str]) -> dict[str, Any]:
     streams = helix_all(account, "streams/followed", {"user_id": account["userID"]})
-    avatars = fetch_avatars(account, [stream["user_id"] for stream in streams])
+    avatars = cache_avatars(
+        fetch_avatars(account, [stream["user_id"] for stream in streams])
+    )
     live = [
         {
             "login": stream["user_login"],
