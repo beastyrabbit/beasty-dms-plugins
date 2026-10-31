@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "TwitchFollows" / "twitch_follows.py"
+# Its sibling modules, as when DMS runs the script.
+sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("twitch_follows", MODULE_PATH)
 assert SPEC and SPEC.loader
 twitch_follows = importlib.util.module_from_spec(SPEC)
@@ -74,6 +76,7 @@ class FetchTests(unittest.TestCase):
                         "user_login": "small",
                         "user_name": "Small",
                         "title": "t1",
+                        "game_name": "Art",
                         "viewer_count": 10,
                     },
                 ],
@@ -113,6 +116,8 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(result["user"], "viewer")
         self.assertEqual([c["login"] for c in result["live"]], ["big", "small"])
         self.assertEqual(result["live"][1]["title"], "t1")
+        self.assertEqual(result["live"][1]["game"], "Art")
+        self.assertEqual(result["live"][0]["game"], "")
         self.assertEqual(result["live"][0]["avatar"], "https://cdn/1-70x70.png")
         self.assertNotIn("offline", result)
         self.assertEqual(calls[-1], ("users", {"id": ["2", "1"]}))
@@ -209,7 +214,8 @@ class LaunchTests(unittest.TestCase):
         )
         mpv_args = (bin_dir / "mpv.args").read_text()
         self.assertIn("--force-window=immediate --volume=30 --mute=no", mpv_args)
-        self.assertIn("--force-media-title=Big - hi -", mpv_args)
+        self.assertIn("--force-media-title=Big - hi", mpv_args)
+        self.assertIn("--cache-on-disk=yes --demuxer-max-back-bytes=2300MiB", mpv_args)
 
     def test_muted_watch_keeps_the_volume_for_unmuting(self) -> None:
         bin_dir = self.fake_tools("printf video", "cat > /dev/null")

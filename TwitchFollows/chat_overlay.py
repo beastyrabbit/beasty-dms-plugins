@@ -40,7 +40,8 @@ WRAP_WIDTH = 48
 TOGGLE_KEY = "c"
 # Marks a Twitch window, so uosc can show its chat button only there.
 MARKER_PROPERTY = "user-data/twitch-chat"
-# "yes" or "no"; the uosc chat button sets it, and the `c` key asks us to flip it.
+# "yes" or "no"; the uosc chat button sets it (through twitch_buttons.lua), and
+# the `c` key asks us to flip it.
 VISIBLE_PROPERTY = "user-data/twitch-chat-visible"
 TOGGLE_MESSAGE = "twitch-chat-toggle"
 # `End` (and a uosc button) jump back to the live edge, mirroring mpv's `Home`.
@@ -50,7 +51,8 @@ LIVE_REQUEST_ID = 42
 # Stay this far behind the newest buffered frame so playback doesn't stall.
 LIVE_MARGIN_SECONDS = 1.5
 OSD_PROPERTY = "osd-dimensions"
-IMAGE_OVERLAY_ID = 0
+# Above the still that stream_quality shows while only audio plays (overlay 0).
+IMAGE_OVERLAY_ID = 1
 # Redraw rate while an animated emote is on screen.
 ANIMATION_FPS = 15
 # Twitch's palette for users who never picked a name color.
@@ -246,7 +248,11 @@ class ChatFeed:
 class Mpv:
     def __init__(self, path: str) -> None:
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(path)
+        try:
+            self.sock.connect(path)
+        except OSError:
+            self.sock.close()
+            raise
         self.buffer = b""
 
     def send(self, command: list | dict, request_id: int | None = None) -> None:
