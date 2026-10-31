@@ -96,6 +96,27 @@ class ImageLayoutTests(unittest.TestCase):
         panel = renderer.layout([message], 300, 720)
         self.assertLessEqual(panel.width, 300)
 
+    def test_kaomoji_missing_from_emoji_font_stays_on_one_line(self) -> None:
+        chat_image, emotes = self.modules()
+        renderer = chat_image.ChatRenderer(
+            emotes.EmoteCatalog(lambda: None), emotes.EmoteImages(lambda: None)
+        )
+        # A text font without box-drawing glyphs, so ╯ needs a fallback font.
+        latin = chat_image.font_file("Liberation Sans")
+        if not latin or chat_image.has_glyph(latin, "╯"):
+            self.skipTest("needs a sans font without ╯")
+        renderer.regular = renderer.bold = latin
+        plain = renderer.layout(
+            [chat_overlay.ChatMessage("Bot", "#FFFFFF", "hi", False, 0.0)], 1280, 720
+        )
+        flip = renderer.layout(
+            [chat_overlay.ChatMessage("Bot", "#FFFFFF", "(╯°□°）╯︵ ʎz", False, 0.0)],
+            1280,
+            720,
+        )
+        self.assertEqual(len(flip.lines), 1)
+        self.assertLessEqual(flip.height, plain.height * 1.5)
+
     def test_zero_width_emote_stays_on_top_of_animated_one(self) -> None:
         chat_image, emotes = self.modules()
         from PIL import Image

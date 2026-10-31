@@ -670,9 +670,12 @@ def play(
     # the setting only decides whether chat starts visible.
     ipc_path = runtime_path(f"twitch-follows-{login}-{os.getpid()}.sock")
     player.append(f"--input-ipc-server={ipc_path}")
+    # uv provides the Pillow the overlay declares inline, so emotes show even
+    # where the system Python lacks it; plain Python falls back to text chat.
+    uv = shutil.which("uv")
     overlay = subprocess.Popen(
         [
-            sys.executable,
+            *([uv, "run", "--script"] if uv else [sys.executable]),
             str(Path(__file__).with_name("chat_overlay.py")),
             login,
             str(ipc_path),

@@ -81,15 +81,19 @@ def is_color_font(path: str) -> bool:
     return "emoji" in path.lower()
 
 
+def glyph_size(path: str) -> int:
+    return COLOR_EMOJI_SIZE if is_color_font(path) else FONT_SIZE
+
+
 @functools.cache
 def notdef_mask(path: str) -> tuple:
-    mask = load_font(path, FONT_SIZE).getmask("\U0010ffff")
+    mask = load_font(path, glyph_size(path)).getmask("\U0010ffff")
     return mask.size, bytes(mask)
 
 
 @functools.cache
 def has_glyph(path: str, char: str) -> bool:
-    mask = load_font(path, FONT_SIZE).getmask(char)
+    mask = load_font(path, glyph_size(path)).getmask(char)
     return (mask.size, bytes(mask)) != notdef_mask(path)
 
 
@@ -97,10 +101,13 @@ def has_glyph(path: str, char: str) -> bool:
 def fallback_file(char: str) -> str:
     # Prefer the color emoji font; plain fontconfig fallback often picks a
     # black-and-white emoji glyph from a text font such as DejaVu Sans.
+    # fontconfig answers with its closest font even when that font lacks the
+    # character, so check: kaomoji such as ╯ must not become empty emoji.
     emoji = font_file(f"emoji:charset={ord(char):x}")
-    if is_color_font(emoji):
+    if is_color_font(emoji) and has_glyph(emoji, char):
         return emoji
-    return font_file(f":charset={ord(char):x}")
+    path = font_file(f":charset={ord(char):x}")
+    return path if path and has_glyph(path, char) else ""
 
 
 @dataclass
