@@ -13,7 +13,7 @@ import unittest
 import urllib.error
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "TwitchFollows" / "twitch_follows.py"
@@ -234,6 +234,59 @@ class AvatarCacheTests(unittest.TestCase):
         self.assertTrue(recent.exists())
 
 
+class ChatSyncTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.sync = twitch_follows.ChatSync(Path("unused.sock"), "0123abcd")
+        self.mpv = MagicMock()
+        self.mpv.events.return_value = []
+        self.sync.mpv = self.mpv
+        mode = patch.object(twitch_follows, "set_chat_mode")
+        self.set_chat_mode = mode.start()
+        self.addCleanup(mode.stop)
+
+    def step(self, in_mpv: bool, *shown: str) -> None:
+        self.mpv.events.return_value = [
+            {
+                "event": "property-change",
+                "name": twitch_follows.CHAT_VISIBLE_PROPERTY,
+                "data": value,
+            }
+            for value in shown
+        ]
+        self.sync.step({"chatInMpv": in_mpv})
+
+    def sent(self) -> list:
+        return [call.args[0] for call in self.mpv.send.call_args_list]
+
+    def test_a_joining_stream_takes_the_groups_chat_mode(self) -> None:
+        self.step(True)  # mpv hasn't said what it shows yet
+        self.assertEqual(self.sent(), [])
+        self.step(True, "no")
+        visible = twitch_follows.CHAT_VISIBLE_PROPERTY
+        self.assertEqual(self.sent(), [["set_property", visible, "yes"]])
+        # A report from before mpv took it isn't the user's button.
+        self.step(True, "no")
+        self.step(True, "yes")
+        self.step(True)
+        self.set_chat_mode.assert_not_called()
+        self.assertEqual(len(self.sent()), 1)
+
+    def test_the_chat_button_switches_the_group(self) -> None:
+        self.step(False, "no")
+        self.step(False, "yes")
+        self.set_chat_mode.assert_called_once_with("0123abcd", True)
+        self.step(True)
+        self.assertEqual(self.sent(), [])
+
+    def test_another_streams_button_switches_this_one(self) -> None:
+        self.step(False, "no")
+        self.step(True)
+        visible = twitch_follows.CHAT_VISIBLE_PROPERTY
+        self.assertEqual(self.sent(), [["set_property", visible, "yes"]])
+        self.step(True, "yes")
+        self.set_chat_mode.assert_not_called()
+
+
 class LaunchTests(unittest.TestCase):
     def setUp(self) -> None:
         runtime = tempfile.TemporaryDirectory()
@@ -281,7 +334,7 @@ class LaunchTests(unittest.TestCase):
                     "Big",
                     "--quality",
                     "720p60",
-                    "--no-chat-overlay",
+                    "--chat-in-player",
                     "--media-title",
                     "Big - hi",
                 ]
@@ -305,7 +358,7 @@ class LaunchTests(unittest.TestCase):
 
     def test_muted_watch_keeps_the_volume_for_unmuting(self) -> None:
         bin_dir = self.fake_tools("printf video", "cat > /dev/null")
-        twitch_follows.main(["--watch", "big", "--muted", "--no-chat-overlay"])
+        twitch_follows.main(["--watch", "big", "--muted"])
         self.assertIn("--volume=30 --mute=yes", (bin_dir / "mpv.args").read_text())
 
     def test_watch_starts_chat_overlay_on_the_mpv_socket(self) -> None:
@@ -329,20 +382,33 @@ class LaunchTests(unittest.TestCase):
         with patch.object(
             twitch_follows.subprocess, "Popen", wraps=subprocess.Popen
         ) as popen:
-            twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+            twitch_follows.main(["--watch", "big"])
         overlay = popen.call_args_list[0].args[0]
         self.assertEqual(overlay[:3], [str(uv), "run", "--script"])
         self.assertTrue(overlay[3].endswith("chat_overlay.py"))
 
-    def test_chat_setting_off_still_starts_relay_hidden_for_jump_to_live(self) -> None:
+    def test_chat_starts_in_chatterino_with_the_relay_hidden_for_jump_to_live(
+        self,
+    ) -> None:
+        self.fake_tools("printf video", "cat > /dev/null")
+        with (
+            patch.object(twitch_follows, "chatterino_command", return_value=["true"]),
+            patch.object(
+                twitch_follows.subprocess, "Popen", wraps=subprocess.Popen
+            ) as popen,
+        ):
+            twitch_follows.main(["--watch", "big"])
+        overlay = popen.call_args_list[0].args[0]
+        self.assertTrue(overlay[1].endswith("chat_overlay.py"))
+        self.assertEqual(overlay[4:], ["--hidden"])
+
+    def test_without_chatterino_chat_shows_in_mpv(self) -> None:
         self.fake_tools("printf video", "cat > /dev/null")
         with patch.object(
             twitch_follows.subprocess, "Popen", wraps=subprocess.Popen
         ) as popen:
-            twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
-        overlay = popen.call_args_list[0].args[0]
-        self.assertTrue(overlay[1].endswith("chat_overlay.py"))
-        self.assertEqual(overlay[4:], ["--hidden"])
+            twitch_follows.main(["--watch", "big"])
+        self.assertEqual(popen.call_args_list[0].args[0][4:], [])
 
     def test_failed_stream_notifies_with_streamlink_error(self) -> None:
         self.fake_tools(
@@ -350,7 +416,7 @@ class LaunchTests(unittest.TestCase):
             "sleep 0.5; cat > /dev/null",
         )
         with patch.object(twitch_follows, "notify") as notify:
-            code = twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+            code = twitch_follows.main(["--watch", "big"])
         self.assertEqual(code, 1)
         notify.assert_called_once_with(
             "Could not play big", "error: No playable streams found"
@@ -359,7 +425,7 @@ class LaunchTests(unittest.TestCase):
     def test_failed_stream_notifies_when_mpv_exits_in_the_same_poll(self) -> None:
         self.fake_tools("echo 'error: offline' >&2; exit 1", "cat > /dev/null; exit 2")
         with patch.object(twitch_follows, "notify") as notify:
-            code = twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+            code = twitch_follows.main(["--watch", "big"])
         self.assertEqual(code, 1)
         notify.assert_called_once_with("Could not play big", "error: offline")
 
@@ -367,7 +433,7 @@ class LaunchTests(unittest.TestCase):
         self.fake_tools("trap 'exit 1' TERM; sleep 5 & wait", "exit 0")
         started = time.monotonic()
         with patch.object(twitch_follows, "notify") as notify:
-            code = twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+            code = twitch_follows.main(["--watch", "big"])
         self.assertEqual(code, 0)
         notify.assert_not_called()
         self.assertLess(time.monotonic() - started, 3)
@@ -415,7 +481,7 @@ if sys.argv[1] == "repl":
     sys.exit(0)
 clients = [
     {{"address": "0xdead", "class": "com.chatterino.chatterino", "pid": 2}},
-    {{"address": "0xc3", "class": "mpv", "pid": 4}},
+    {{"address": "0xc3", "class": "mpv", "pid": 4, "workspace": {{"id": 3, "name": "3"}}}},
 ]
 mpv_pid = os.path.join({self.runtime!r}, "mpv.pid")
 if os.path.exists(mpv_pid):
@@ -471,7 +537,7 @@ print(json.dumps(clients))
             twitch_follows, "chatterino_command", return_value=[str(chat)]
         ):
             started = time.monotonic()
-            code = twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+            code = twitch_follows.main(["--watch", "big"])
         self.assertEqual(code, 0)
         self.assertLess(time.monotonic() - started, 4)
         launch, remove = (bin_dir / "chat.args").read_text().splitlines()
@@ -551,6 +617,63 @@ print(json.dumps(clients))
             [s["login"] for g in self.groups() for s in g["streams"]], ["other"]
         )
 
+    def chat_group(self, bin_dir: Path, in_mpv: bool) -> subprocess.Popen:
+        """A group with stream 0xc3 and chat 0xb2, both alive."""
+        other = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        (bin_dir / "chat.pid").write_text(str(other.pid))
+        twitch_follows.save_groups(
+            [
+                {
+                    "id": "0123abcd",
+                    "shared": True,
+                    "chat": "0xb2",
+                    "chatPid": other.pid,
+                    "chatInMpv": in_mpv,
+                    "streams": [{"login": "other", "pid": other.pid, "window": "0xc3"}],
+                }
+            ]
+        )
+        return other
+
+    def test_chat_in_mpv_hides_chatterino_and_back(self) -> None:
+        bin_dir = self.fake_tools("", "")
+        self.fake_chat(bin_dir)
+        self.chat_group(bin_dir, in_mpv=False)
+        twitch_follows.set_chat_mode("0123abcd", True)
+        self.assertTrue(self.groups()[0]["chatInMpv"])
+        hide, arranged = (bin_dir / "repl").read_text().split("\n----\n")[:2]
+        self.assertIn('"address:0xb2"', hide)
+        self.assertIn('workspace = "special:twitch-chat"', hide)
+        # One stream alone needs no layout.
+        self.assertEqual(arranged, "")
+        twitch_follows.set_chat_mode("0123abcd", True)  # already there
+        self.assertEqual(len((bin_dir / "repl").read_text().split("\n----\n")), 2)
+        (bin_dir / "repl").unlink()
+        twitch_follows.set_chat_mode("0123abcd", False)
+        self.assertFalse(self.groups()[0]["chatInMpv"])
+        show, arranged = (bin_dir / "repl").read_text().split("\n----\n")[:2]
+        self.assertIn('workspace = "3", window = "address:0xb2"', show)
+        self.assertIn('{ window = "address:0xb2", size = 25 }', arranged)
+        self.assertIn(' }, "0xc3"\n', arranged)  # focus
+
+    def test_joining_a_group_with_chat_in_mpv_keeps_chatterino_out(self) -> None:
+        bin_dir = self.fake_tools(
+            "printf video", f'echo $$ > "{self.runtime}/mpv.pid"; sleep 1; cat'
+        )
+        chat = self.fake_chat(bin_dir)
+        self.chat_group(bin_dir, in_mpv=True)
+        with patch.object(
+            twitch_follows, "chatterino_command", return_value=[str(chat)]
+        ):
+            code = twitch_follows.main(["--watch", "big", "--group", "0123abcd"])
+        self.assertEqual(code, 0)
+        hide, joined = (bin_dir / "repl").read_text().split("\n----\n")[:2]
+        self.assertIn("special:twitch-chat", hide)
+        self.assertIn("weave.create", joined)
+        self.assertNotIn("0xb2", joined)
+
     def test_closing_the_group_chat_closes_the_stream(self) -> None:
         bin_dir = self.fake_tools(
             "trap 'exit 1' TERM; sleep 10 & wait",
@@ -565,7 +688,7 @@ print(json.dumps(clients))
             patch.object(twitch_follows, "notify") as notify,
         ):
             started = time.monotonic()
-            code = twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+            code = twitch_follows.main(["--watch", "big"])
         self.assertEqual(code, 0)
         self.assertLess(time.monotonic() - started, 5)
         notify.assert_not_called()

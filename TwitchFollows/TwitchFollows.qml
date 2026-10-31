@@ -12,7 +12,7 @@ PluginComponent {
     readonly property string helperPath: Paths.strip(Qt.resolvedUrl("twitch_follows.py"))
     readonly property int refreshSeconds: parseInt(pluginData.refreshSeconds ?? "120") || 120
     readonly property string quality: pluginData.quality || "best"
-    readonly property bool chatOverlay: pluginData.chatOverlay ?? true
+    readonly property bool chatInPlayer: pluginData.chatInPlayer ?? false
     readonly property string volume: String(pluginData.volume ?? "30")
 
     // Shared by every bar instance (one per screen), so only one fetch runs per interval.
@@ -73,8 +73,8 @@ PluginComponent {
         const args = ["--watch", channel.login, "--quality", quality, "--volume", volume, "--media-title", title];
         if (muted)
             args.push("--muted");
-        if (!chatOverlay)
-            args.push("--no-chat-overlay");
+        if (chatInPlayer)
+            args.push("--chat-in-player");
         if (groupId)
             args.push("--group", groupId);
         launch(args);

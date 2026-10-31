@@ -44,7 +44,8 @@ TOGGLE_KEY = "c"
 # Marks a Twitch window, so uosc can show its chat button only there.
 MARKER_PROPERTY = "user-data/twitch-chat"
 # "yes" or "no"; the uosc chat button sets it (through twitch_buttons.lua), and
-# the `c` key asks us to flip it.
+# the `c` key asks us to flip it. twitch_follows.ChatSync carries it to the
+# group's other streams and hides or shows the Chatterino window to match.
 VISIBLE_PROPERTY = "user-data/twitch-chat-visible"
 TOGGLE_MESSAGE = "twitch-chat-toggle"
 # `End` (and a uosc button) jump back to the live edge, mirroring mpv's `Home`.

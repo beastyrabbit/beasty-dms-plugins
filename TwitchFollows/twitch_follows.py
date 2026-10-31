@@ -300,6 +300,28 @@ def fetch_follows(account: dict[str, str]) -> dict[str, Any]:
     return {"ok": True, "user": account.get("username", ""), "live": live}
 
 
+# chat_overlay.VISIBLE_PROPERTY: "yes" while chat shows in mpv.
+CHAT_VISIBLE_PROPERTY = "user-data/twitch-chat-visible"
+# A group's Chatterino window waits here while its chat shows in the streams.
+CHAT_WORKSPACE = "special:twitch-chat"
+# Takes the chat window out of the group's layout (a hyprweave weave or a tab
+# group) and hides it.
+HIDE_CHAT_LUA = """
+local sel = "address:CHAT"
+if not hl.get_window(sel) then return "missing" end
+local weave = hl.plugin.hyprweave
+if weave and weave.get({ window = sel }) then weave.dissolve({ window = sel }) end
+local w = hl.get_window(sel)
+if w.group then w.group:remove(w) end
+hl.dispatch(hl.dsp.window.move({ workspace = "WORKSPACE", window = sel, follow = false }))
+return "ok"
+"""
+SHOW_CHAT_LUA = """
+hl.dispatch(hl.dsp.window.move({ workspace = "WORKSPACE", window = "address:CHAT", follow = false }))
+return "ok"
+"""
+
+
 def chatterino_command() -> list[str] | None:
     for name in ("chatterino", "chatterino2"):
         path = shutil.which(name)
@@ -439,7 +461,9 @@ def arrange(hyprctl: str, group: dict[str, Any], focus: str = "") -> None:
     """Lays out the group's open windows; see ARRANGE_LUA."""
     present = {c.get("address") for c in hypr_clients(hyprctl)}
     streams = [s["window"] for s in group["streams"] if s["window"] in present]
-    chat = group["chat"] if group["chat"] in present else ""
+    chat = group["chat"]
+    if chat not in present or group.get("chatInMpv"):
+        chat = ""
     windows = [*streams, chat] if chat else streams
     if len(windows) < 2 or not all(ADDRESS_PATTERN.match(w) for w in windows):
         return
@@ -452,7 +476,7 @@ def arrange(hyprctl: str, group: dict[str, Any], focus: str = "") -> None:
 
 
 def join_group(
-    login: str, viewer: subprocess.Popen, group_id: str
+    login: str, viewer: subprocess.Popen, group_id: str, chat_in_mpv: bool
 ) -> tuple[dict[str, Any], subprocess.Popen | None]:
     """Adds the stream to a viewing group and opens its chat there.
 
@@ -461,6 +485,9 @@ def join_group(
     per group: the first stream starts it as a named instance, and later
     streams hand it their channel as another tab. The Flatpak can't, so it
     opens one window per stream and each stream gets its own group.
+
+    A new group starts with its chat where chat_in_mpv says; a stream that
+    joins takes the group's (see ChatSync).
 
     Returns the group and the Chatterino process started here, if any.
     """
@@ -481,6 +508,7 @@ def join_group(
                 "shared": shared,
                 "chat": "",
                 "chatPid": 0,
+                "chatInMpv": chat_in_mpv,
                 "streams": [],
             }
             groups.append(group)
@@ -503,6 +531,8 @@ def join_group(
         if hyprctl:
             find_windows(hyprctl, viewer, chat, group, stream, before)
             save_groups(groups)
+            if group.get("chatInMpv"):
+                hide_chat(hyprctl, group["chat"])
             arrange(hyprctl, group, focus=stream["window"])
     return group, chat
 
@@ -536,10 +566,126 @@ def find_windows(
         time.sleep(0.1)
 
 
-def chat_closed(group_id: str) -> bool:
+def hide_chat(hyprctl: str, chat: str) -> None:
+    if ADDRESS_PATTERN.match(chat):
+        lua = HIDE_CHAT_LUA.replace("CHAT", chat).replace("WORKSPACE", CHAT_WORKSPACE)
+        subprocess.run([hyprctl, "repl", lua], capture_output=True, check=False)
+
+
+def show_chat(hyprctl: str, group: dict[str, Any]) -> str:
+    """Brings the chat window back to the group's first stream's workspace;
+    returns that stream's window."""
+    clients = {c.get("address"): c for c in hypr_clients(hyprctl)}
+    stream = next((s["window"] for s in group["streams"] if s["window"] in clients), "")
+    if not stream or not ADDRESS_PATTERN.match(group["chat"]):
+        return ""
+    workspace = clients[stream].get("workspace", {})
+    name = str(workspace.get("name", ""))
+    if workspace.get("id", 0) > 0:
+        target = str(workspace["id"])
+    elif name.startswith("special:"):
+        target = name
+    else:
+        target = f"name:{name}"
+    lua = SHOW_CHAT_LUA.replace("CHAT", group["chat"]).replace("WORKSPACE", target)
+    subprocess.run([hyprctl, "repl", lua], capture_output=True, check=False)
+    return stream
+
+
+def set_chat_mode(group_id: str, in_mpv: bool) -> None:
+    """Moves a group's chat into its streams' mpv windows, hiding the
+    Chatterino window, or back into Chatterino, and lays the group out again.
+    The other streams' ChatSync then follow the group."""
+    hyprctl = shutil.which("hyprctl")
+    with file_lock(GROUPS_LOCK, blocking=True):
+        groups = load_groups()
+        group = next((g for g in groups if g["id"] == group_id), None)
+        if group is None or group.get("chatInMpv") == in_mpv:
+            return
+        group["chatInMpv"] = in_mpv
+        save_groups(groups)
+        if not hyprctl or not group["chat"]:
+            return
+        if in_mpv:
+            hide_chat(hyprctl, group["chat"])
+            arrange(hyprctl, group)
+        else:
+            # Focusing a stream regroups the tabs when hyprweave isn't there.
+            arrange(hyprctl, group, focus=show_chat(hyprctl, group))
+
+
+class ChatSync:
+    """Keeps a stream's mpv chat in step with its group. A group's chat shows
+    either in every stream's mpv, with the Chatterino window hidden, or in
+    Chatterino, with mpv's chat hidden. The chat button (or `c`) in any of the
+    group's streams switches the whole group: that stream sets the group's
+    mode, and the other streams follow it."""
+
+    def __init__(self, ipc_path: Path, group_id: str) -> None:
+        self.ipc_path = ipc_path
+        self.group_id = group_id
+        self.mpv = None
+        # What this mpv shows, the group mode it last agreed with, and a
+        # value set here that mpv hasn't reported back yet.
+        self.shown: bool | None = None
+        self.synced: bool | None = None
+        self.expected: bool | None = None
+
+    def step(self, group: dict[str, Any] | None) -> None:
+        if group is None:
+            return
+        if self.mpv is None:
+            self.connect()
+            return
+        try:
+            events = self.mpv.events(0.01)
+        except (EOFError, OSError):
+            self.close()
+            return
+        for event in events:
+            value = event.get("data")
+            if (
+                event.get("event") == "property-change"
+                and event.get("name") == CHAT_VISIBLE_PROPERTY
+                and value in ("yes", "no")
+                and self.expected in (None, value == "yes")
+            ):
+                self.shown, self.expected = value == "yes", None
+        if self.shown is None or self.expected is not None:
+            return
+        mode = bool(group.get("chatInMpv"))
+        if mode != self.synced:
+            # Joined just now, or another stream switched the group.
+            self.synced = mode
+            if self.shown != mode:
+                self.expected = mode
+                value = "yes" if mode else "no"
+                self.mpv.send(["set_property", CHAT_VISIBLE_PROPERTY, value])
+        elif self.shown != mode:
+            # This stream's chat button.
+            self.synced = self.shown
+            set_chat_mode(self.group_id, self.shown)
+
+    def connect(self) -> None:
+        # Imported here: chat_overlay pulls in Pillow, which listing channels
+        # doesn't need.
+        from chat_overlay import Mpv
+
+        try:
+            self.mpv = Mpv(str(self.ipc_path))
+        except OSError:
+            return
+        self.mpv.send(["observe_property", 1, CHAT_VISIBLE_PROPERTY])
+
+    def close(self) -> None:
+        if self.mpv:
+            self.mpv.sock.close()
+            self.mpv = None
+
+
+def chat_closed(group: dict[str, Any] | None) -> bool:
     """True once the group's Chatterino is gone while its streams still play,
     which means the user closed the chat."""
-    group = next((g for g in load_groups() if g["id"] == group_id), None)
     return bool(group and group["chatPid"]) and not pid_alive(group["chatPid"])
 
 
@@ -588,7 +734,7 @@ def leave_group(
 def watch(
     login: str,
     quality: str,
-    chat_overlay: bool = True,
+    chat_in_mpv: bool = False,
     volume: int = DEFAULT_VOLUME,
     media_title: str = "",
     group_id: str = "",
@@ -610,7 +756,7 @@ def watch(
             mpv,
             login,
             quality,
-            chat_overlay,
+            chat_in_mpv,
             volume,
             media_title or login,
             group_id,
@@ -622,19 +768,22 @@ def wait_while_playing(
     viewer: subprocess.Popen,
     relay: stream_quality.Relay,
     switcher: stream_quality.Switcher,
+    chat_sync: ChatSync,
     group: dict[str, Any],
     chat: subprocess.Popen | None,
 ) -> bool:
-    """Waits until mpv exits or the stream ends, switching quality meanwhile.
-    The group's streams close with its chat window: returns True when that
-    closed mpv."""
+    """Waits until mpv exits or the stream ends, switching quality and keeping
+    the chat in step with the group meanwhile. The group's streams close with
+    its chat window: returns True when that closed mpv."""
     while viewer.poll() is None and not relay.finished.is_set():
         if chat:
             chat.poll()  # reaps it, so a closed chat isn't a zombie
-        if chat_closed(group["id"]):
+        current = next((g for g in load_groups() if g["id"] == group["id"]), None)
+        if chat_closed(current):
             viewer.terminate()
             viewer.wait()
             return True
+        chat_sync.step(current)
         switcher.step(0.2)
     return False
 
@@ -644,7 +793,7 @@ def play(
     mpv: str,
     login: str,
     quality: str,
-    chat_overlay: bool,
+    chat_in_mpv: bool,
     volume: int,
     media_title: str,
     group_id: str,
@@ -666,8 +815,9 @@ def play(
         f"--demuxer-max-back-bytes={REWIND_BUFFER}",
         f"--script={Path(__file__).with_name('twitch_buttons.lua')}",
     ]
-    # The chat relay always runs because it also handles `End` (jump to live);
-    # the setting only decides whether chat starts visible.
+    # Without a Chatterino, mpv is the only place for chat. The chat relay
+    # always runs, because it also handles `End` (jump to live).
+    chat_in_mpv = chat_in_mpv or chatterino_command() is None
     ipc_path = runtime_path(f"twitch-follows-{login}-{os.getpid()}.sock")
     player.append(f"--input-ipc-server={ipc_path}")
     # uv provides the Pillow the overlay declares inline, so emotes show even
@@ -679,7 +829,7 @@ def play(
             str(Path(__file__).with_name("chat_overlay.py")),
             login,
             str(ipc_path),
-            *([] if chat_overlay else ["--hidden"]),
+            *([] if chat_in_mpv else ["--hidden"]),
         ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -689,6 +839,7 @@ def play(
     selection = QUALITY_FALLBACKS.get(quality, f"{quality},best")
     joined = None
     switcher = None
+    chat_sync = None
     try:
         first = stream_quality.Source.start(streamlink, login, selection, log_path)
         viewer = subprocess.Popen(
@@ -703,11 +854,14 @@ def play(
             selection.split(","), audio_only=quality == "audio_only"
         )
         switcher = stream_quality.Switcher(streamlink, login, ipc_path, policy, relay)
-        joined = join_group(login, viewer, group_id)
+        joined = join_group(login, viewer, group_id, chat_in_mpv)
+        chat_sync = ChatSync(ipc_path, joined[0]["id"])
         # Whichever ends first decides: mpv closed by the user is normal, the
         # stream ending first means it failed or ended. After a quality
         # switch, that is the streamlink switched to.
-        closed_with_chat = wait_while_playing(viewer, relay, switcher, *joined)
+        closed_with_chat = wait_while_playing(
+            viewer, relay, switcher, chat_sync, *joined
+        )
         source = relay.current.process
         source_ended_first = relay.source_ended
         if source_ended_first:
@@ -728,6 +882,8 @@ def play(
         )
         lines = relay.current.log().strip().splitlines()
     finally:
+        if chat_sync:
+            chat_sync.close()
         if switcher:
             switcher.close()
             if switcher.source.log_path != log_path:
@@ -769,9 +925,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--media-title", default="", help="mpv window title for --watch"
     )
     parser.add_argument(
-        "--no-chat-overlay",
+        "--chat-in-player",
         action="store_true",
-        help="start the --watch player with chat hidden",
+        help="start a new --watch group with chat in mpv and Chatterino hidden",
     )
     parser.add_argument(
         "--group",
@@ -806,7 +962,7 @@ def main(argv: list[str] | None = None) -> int:
     return watch(
         login.lower(),
         quality,
-        not args.no_chat_overlay,
+        args.chat_in_player,
         volume,
         args.media_title[:200],
         group_id,

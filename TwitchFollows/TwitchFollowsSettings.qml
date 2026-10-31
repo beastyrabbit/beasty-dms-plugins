@@ -91,9 +91,9 @@ PluginSettings {
     }
 
     ToggleSetting {
-        settingKey: "chatOverlay"
-        label: "Show chat in the player"
-        description: "Show the channel's chat over the stream when it opens. Press C in mpv to hide or show it."
-        defaultValue: true
+        settingKey: "chatInPlayer"
+        label: "Start with chat in the player"
+        description: "Open new streams with their chat drawn in mpv and the Chatterino window hidden. The chat button in mpv (or C) switches a whole group between the two."
+        defaultValue: false
     }
 }
