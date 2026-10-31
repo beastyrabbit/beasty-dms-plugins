@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import hashlib
+import http.client
 import json
 import math
 import os
@@ -24,11 +26,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
+import stream_quality
+
 HELIX_URL = "https://api.twitch.tv/helix"
 REQUEST_TIMEOUT_SECONDS = 10
+# Avatars are kept on disk so the list shows them at once; the periodic list
+# refresh downloads them again once they are this old, and drops unused ones.
+AVATAR_MAX_AGE_SECONDS = 7 * 24 * 3600
+AVATAR_TIMEOUT_SECONDS = 5
+# All downloads together, well within the 30 seconds the list may take.
+AVATAR_DEADLINE_SECONDS = 10
 MAX_PAGES = 20
 CHATTERINO_FLATPAK_ID = "com.chatterino.chatterino"
 CHATTERINO_CLASSES = {CHATTERINO_FLATPAK_ID, "chatterino"}
@@ -107,6 +118,7 @@ hl.dispatch(hl.dsp.focus({ window = sel(focus) }))
 return "ok"
 """
 DEFAULT_VOLUME = 30
+REWIND_BUFFER = "2300MiB"
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,25}$")
 QUALITY_PATTERN = re.compile(r"^[A-Za-z0-9_,+-]{1,40}$")
 # Twitch renditions from highest to lowest. Transcodes are named like 480p30;
@@ -220,15 +232,68 @@ def fetch_avatars(account: dict[str, str], user_ids: list[str]) -> dict[str, str
     return avatars
 
 
+def avatar_dir() -> Path:
+    cache = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
+    return Path(cache) / "twitch-follows" / "avatars"
+
+
+def cached_avatar(url: str, directory: Path, now: float) -> str:
+    """A local copy of the avatar, downloaded again once it's a week old;
+    the old copy, or the URL itself, if downloading fails."""
+    if not url.startswith("https://"):
+        return url
+    suffix = Path(urllib.parse.urlparse(url).path).suffix[:5]
+    path = directory / (hashlib.sha256(url.encode()).hexdigest()[:32] + suffix)
+    with contextlib.suppress(OSError):
+        if now - path.stat().st_mtime < AVATAR_MAX_AGE_SECONDS:
+            return path.as_uri()
+    try:
+        with urllib.request.urlopen(url, timeout=AVATAR_TIMEOUT_SECONDS) as reply:
+            data = reply.read()
+        directory.mkdir(parents=True, exist_ok=True)
+        # Renamed into place, so the list never loads a half-written file.
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.new")
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
+    except (OSError, http.client.HTTPException):  # timeouts are OSErrors
+        return path.as_uri() if path.exists() else url
+    return path.as_uri()
+
+
+def cache_avatars(urls: dict[str, str]) -> dict[str, str]:
+    directory = avatar_dir()
+    now = time.time()
+    # Each URL once: channels without their own picture share Twitch's default.
+    unique = list(dict.fromkeys(urls.values()))
+    pool = ThreadPoolExecutor(max_workers=8)
+    futures = {url: pool.submit(cached_avatar, url, directory, now) for url in unique}
+    done, _ = wait(futures.values(), timeout=AVATAR_DEADLINE_SECONDS)
+    # Avatars still downloading load from Twitch this time.
+    local = {url: f.result() if f in done else url for url, f in futures.items()}
+    pool.shutdown(wait=False, cancel_futures=True)
+    used = {Path(urllib.parse.urlparse(uri).path).name for uri in local.values()}
+    with contextlib.suppress(OSError):
+        for path in directory.iterdir():
+            if (
+                path.name not in used
+                and now - path.stat().st_mtime > AVATAR_MAX_AGE_SECONDS
+            ):
+                path.unlink(missing_ok=True)
+    return {user: local[url] for user, url in urls.items()}
+
+
 def fetch_follows(account: dict[str, str]) -> dict[str, Any]:
     streams = helix_all(account, "streams/followed", {"user_id": account["userID"]})
-    avatars = fetch_avatars(account, [stream["user_id"] for stream in streams])
+    avatars = cache_avatars(
+        fetch_avatars(account, [stream["user_id"] for stream in streams])
+    )
     live = [
         {
             "login": stream["user_login"],
             "name": stream.get("user_name") or stream["user_login"],
             "avatar": avatars.get(stream["user_id"], ""),
             "title": stream.get("title", ""),
+            "game": stream.get("game_name", ""),
         }
         for stream in sorted(streams, key=lambda s: -s.get("viewer_count", 0))
     ]
@@ -555,20 +620,22 @@ def watch(
 
 def wait_while_playing(
     viewer: subprocess.Popen,
-    source: subprocess.Popen,
+    relay: stream_quality.Relay,
+    switcher: stream_quality.Switcher,
     group: dict[str, Any],
     chat: subprocess.Popen | None,
 ) -> bool:
-    """Waits until mpv or streamlink exits. The group's streams close with its
-    chat window: returns True when that closed mpv."""
-    while viewer.poll() is None and source.poll() is None:
+    """Waits until mpv exits or the stream ends, switching quality meanwhile.
+    The group's streams close with its chat window: returns True when that
+    closed mpv."""
+    while viewer.poll() is None and not relay.finished.is_set():
         if chat:
             chat.poll()  # reaps it, so a closed chat isn't a zombie
         if chat_closed(group["id"]):
             viewer.terminate()
             viewer.wait()
             return True
-        time.sleep(0.2)
+        switcher.step(0.2)
     return False
 
 
@@ -583,8 +650,8 @@ def play(
     group_id: str,
     muted: bool,
 ) -> int:
-    # mpv starts right away and streamlink pipes the stream into it, so the
-    # window (with chat and a loading message) appears while streamlink is
+    # mpv starts right away and the relay feeds it what streamlink writes, so
+    # the window (with chat and a loading message) appears while streamlink is
     # still talking to Twitch or skipping a pre-roll ad. A muted stream keeps
     # its volume, so unmuting brings it back at that level.
     player = [
@@ -593,6 +660,11 @@ def play(
         f"--volume={volume}",
         f"--mute={'yes' if muted else 'no'}",
         f"--force-media-title={media_title}",
+        # Keep up to 30 minutes to rewind (about 10 Mbit/s at 1080p60), in
+        # memory: on disk, mpv's limits only bound the index, not the file.
+        "--cache=yes",
+        f"--demuxer-max-back-bytes={REWIND_BUFFER}",
+        f"--script={Path(__file__).with_name('twitch_buttons.lua')}",
     ]
     # The chat relay always runs because it also handles `End` (jump to live);
     # the setting only decides whether chat starts visible.
@@ -610,50 +682,53 @@ def play(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    # streamlink's log goes to a file: a pipe nobody reads could fill up and
-    # stall a long stream.
     log_path = runtime_path(f"twitch-follows-{login}.log")
+    selection = QUALITY_FALLBACKS.get(quality, f"{quality},best")
     joined = None
+    switcher = None
     try:
-        with open(log_path, "w") as log:
-            source = subprocess.Popen(
-                [
-                    streamlink,
-                    "--stdout",
-                    "--twitch-low-latency",
-                    f"https://twitch.tv/{login}",
-                    QUALITY_FALLBACKS.get(quality, f"{quality},best"),
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=log,
-            )
-            viewer = subprocess.Popen(
-                [*player, "-"],
-                stdin=source.stdout,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            assert source.stdout is not None
-            source.stdout.close()
-            joined = join_group(login, viewer, group_id)
-            # Whichever exits first decides: mpv closed by the user is normal,
-            # streamlink ending first means the stream failed or ended.
-            closed_with_chat = wait_while_playing(viewer, source, *joined)
-            source_ended_first = viewer.poll() is None
-            if source_ended_first:
-                viewer.wait()
-            else:
-                source.terminate()
-            source.wait()
-            # Both can be gone by the same poll: mpv exits 2 when it got no
-            # video, but 0 when the user quit it.
-            stream_failed = (
-                not closed_with_chat
-                and source.returncode != 0
-                and (source_ended_first or viewer.returncode != 0)
-            )
+        first = stream_quality.Source.start(streamlink, login, selection, log_path)
+        viewer = subprocess.Popen(
+            [*player, "-"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        relay = stream_quality.Relay(viewer.stdin, first)
+        relay.start()
+        policy = stream_quality.QualityPolicy(
+            selection.split(","), audio_only=quality == "audio_only"
+        )
+        switcher = stream_quality.Switcher(streamlink, login, ipc_path, policy, relay)
+        joined = join_group(login, viewer, group_id)
+        # Whichever ends first decides: mpv closed by the user is normal, the
+        # stream ending first means it failed or ended. After a quality
+        # switch, that is the streamlink switched to.
+        closed_with_chat = wait_while_playing(viewer, relay, switcher, *joined)
+        source = relay.current.process
+        source_ended_first = relay.source_ended
+        if source_ended_first:
+            viewer.wait()  # the relay closed its input
+        elif source.poll() is None:
+            # Killed: streamlink ignores SIGTERM while stuck writing into a
+            # pipe nobody reads any more.
+            source.kill()
+        source.wait()
+        relay.thread.join(timeout=2)
+        source.stdout.close()
+        # Both can be gone by the same poll: mpv exits 2 when it got no
+        # video, but 0 when the user quit it.
+        stream_failed = (
+            not closed_with_chat
+            and source.returncode != 0
+            and (source_ended_first or viewer.returncode != 0)
+        )
+        lines = relay.current.log().strip().splitlines()
     finally:
+        if switcher:
+            switcher.close()
+            if switcher.source.log_path != log_path:
+                switcher.source.log_path.unlink(missing_ok=True)
         # The stream's chat tab closes with it, and the chat window with the
         # group's last stream.
         if joined:
@@ -662,7 +737,6 @@ def play(
         overlay.wait()
         ipc_path.unlink(missing_ok=True)
     if stream_failed:
-        lines = log_path.read_text(errors="replace").strip().splitlines()
         notify(f"Could not play {login}", lines[-1] if lines else "streamlink failed.")
         return source.returncode
     return 0

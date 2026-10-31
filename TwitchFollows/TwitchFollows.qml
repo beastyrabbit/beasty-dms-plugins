@@ -190,8 +190,17 @@ PluginComponent {
             DListView {
                 id: channelList
 
+                // As tall as its rows, up to the room the screen leaves below the bar:
+                // only then does it scroll (and show a scrollbar).
+                readonly property real room: {
+                    const screenRoom = popout.parentPopout?.maxBodyHeight ?? 0;
+                    const total = screenRoom > 0 ? screenRoom : root.popoutHeight;
+                    return total - popout.headerHeight - popout.detailsHeight - PopoutMetrics.contentPadding * 2;
+                }
+
                 width: parent.width
-                height: root.popoutHeight - popout.headerHeight - popout.detailsHeight - Theme.spacingL
+                height: Math.min(contentHeight, room)
+                interactive: contentHeight > room
                 clip: true
                 spacing: 2
                 model: root.liveChannels
@@ -203,7 +212,7 @@ PluginComponent {
                     readonly property int groupIndex: root.groupOf(modelData.login)
 
                     width: channelList.width
-                    height: 52
+                    height: 58
                     radius: Theme.cornerRadius
                     color: rowHover.hovered ? Theme.surfaceTextHover : "transparent"
 
@@ -223,15 +232,14 @@ PluginComponent {
                     DCircularImage {
                         id: avatar
 
-                        width: 38
-                        height: 38
+                        width: 48
+                        height: 48
                         anchors.left: parent.left
                         anchors.leftMargin: Theme.spacingXS
                         anchors.verticalCenter: parent.verticalCenter
                         imageSource: row.modelData.avatar ?? ""
                         fallbackText: (row.modelData.name ?? "?").charAt(0).toUpperCase()
-                        ringWidth: 2
-                        ringColor: "#eb0400"
+                        ringWidth: 0
                     }
 
                     Column {
@@ -251,11 +259,16 @@ PluginComponent {
                             color: Theme.surfaceText
                         }
 
+                        // Fixed height and visibility, so swapping game and title on
+                        // hover never moves the name: titles often hold taller glyphs.
                         StyledText {
-                            visible: text !== ""
+                            visible: !!(row.modelData.game || row.modelData.title)
                             width: parent.width
+                            height: Math.ceil(font.pixelSize * 1.4)
+                            verticalAlignment: Text.AlignVCenter
                             wrapMode: Text.NoWrap
-                            text: row.modelData.title ?? ""
+                            // The game by default; hovering reveals the stream title.
+                            text: (rowHover.hovered ? row.modelData.title : row.modelData.game) ?? ""
                             font.pixelSize: Theme.fontSizeMedium - 1
                             color: Theme.surfaceVariantText
                         }

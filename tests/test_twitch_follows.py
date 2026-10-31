@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -15,6 +17,8 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "TwitchFollows" / "twitch_follows.py"
+# Its sibling modules, as when DMS runs the script.
+sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("twitch_follows", MODULE_PATH)
 assert SPEC and SPEC.loader
 twitch_follows = importlib.util.module_from_spec(SPEC)
@@ -74,6 +78,7 @@ class FetchTests(unittest.TestCase):
                         "user_login": "small",
                         "user_name": "Small",
                         "title": "t1",
+                        "game_name": "Art",
                         "viewer_count": 10,
                     },
                 ],
@@ -106,13 +111,18 @@ class FetchTests(unittest.TestCase):
             self.assertEqual(params["user_id"], "42")
             return pages[params.get("after", "")]
 
-        with patch.object(twitch_follows, "helix_get", fake_get):
+        with (
+            patch.object(twitch_follows, "helix_get", fake_get),
+            patch.object(twitch_follows, "cache_avatars", lambda urls: urls),
+        ):
             result = twitch_follows.fetch_follows(ACCOUNT)
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["user"], "viewer")
         self.assertEqual([c["login"] for c in result["live"]], ["big", "small"])
         self.assertEqual(result["live"][1]["title"], "t1")
+        self.assertEqual(result["live"][1]["game"], "Art")
+        self.assertEqual(result["live"][0]["game"], "")
         self.assertEqual(result["live"][0]["avatar"], "https://cdn/1-70x70.png")
         self.assertNotIn("offline", result)
         self.assertEqual(calls[-1], ("users", {"id": ["2", "1"]}))
@@ -141,6 +151,87 @@ class FetchTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertFalse(result["ok"])
         self.assertNotIn("token", output.getvalue())
+
+
+class AvatarCacheTests(unittest.TestCase):
+    URL = "https://cdn/a-70x70.png"
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.dir = Path(directory.name)
+        self.downloads = 0
+
+    def urlopen(self, url, timeout):
+        self.downloads += 1
+        return io.BytesIO(f"image {self.downloads}".encode())
+
+    def cached(self, now: float) -> str:
+        with patch.object(twitch_follows.urllib.request, "urlopen", self.urlopen):
+            return twitch_follows.cached_avatar(self.URL, self.dir, now)
+
+    def test_downloads_once_and_again_after_a_week(self) -> None:
+        now = time.time()
+        uri = self.cached(now)
+        self.assertTrue(uri.startswith("file://") and uri.endswith(".png"))
+        self.assertEqual(self.cached(now + 60), uri)
+        self.assertEqual(self.downloads, 1)
+        self.cached(now + twitch_follows.AVATAR_MAX_AGE_SECONDS + 1)
+        self.assertEqual(self.downloads, 2)
+        self.assertEqual(Path(uri[len("file://") :]).read_bytes(), b"image 2")
+
+    def test_keeps_the_old_copy_or_the_url_when_downloading_fails(self) -> None:
+        failing = patch.object(
+            twitch_follows.urllib.request,
+            "urlopen",
+            side_effect=urllib.error.URLError("offline"),
+        )
+        with failing:
+            self.assertEqual(
+                twitch_follows.cached_avatar(self.URL, self.dir, time.time()), self.URL
+            )
+        uri = self.cached(time.time())
+        truncated = patch.object(
+            twitch_follows.urllib.request,
+            "urlopen",
+            side_effect=http.client.IncompleteRead(b"half"),
+        )
+        with failing, truncated:
+            later = time.time() + twitch_follows.AVATAR_MAX_AGE_SECONDS + 1
+            self.assertEqual(
+                twitch_follows.cached_avatar(self.URL, self.dir, later), uri
+            )
+
+    def test_slow_downloads_fall_back_to_the_url(self) -> None:
+        def slow(url, timeout):
+            time.sleep(0.5)
+            return io.BytesIO(b"late")
+
+        with (
+            patch.object(twitch_follows, "avatar_dir", lambda: self.dir),
+            patch.object(twitch_follows, "AVATAR_DEADLINE_SECONDS", 0.05),
+            patch.object(twitch_follows.urllib.request, "urlopen", slow),
+        ):
+            self.assertEqual(
+                twitch_follows.cache_avatars({"1": self.URL}), {"1": self.URL}
+            )
+
+    def test_drops_avatars_nobody_live_has_used_for_a_week(self) -> None:
+        old, recent = self.dir / "old.png", self.dir / "recent.png"
+        old.write_bytes(b"x")
+        recent.write_bytes(b"x")
+        week_ago = time.time() - twitch_follows.AVATAR_MAX_AGE_SECONDS - 1
+        os.utime(old, (week_ago, week_ago))
+        with (
+            patch.object(twitch_follows, "avatar_dir", lambda: self.dir),
+            patch.object(twitch_follows.urllib.request, "urlopen", self.urlopen),
+        ):
+            avatars = twitch_follows.cache_avatars({"1": self.URL, "2": self.URL})
+        self.assertTrue(avatars["1"].startswith("file://"))
+        self.assertEqual(avatars["2"], avatars["1"])
+        self.assertEqual(self.downloads, 1)
+        self.assertFalse(old.exists())
+        self.assertTrue(recent.exists())
 
 
 class LaunchTests(unittest.TestCase):
@@ -209,7 +300,8 @@ class LaunchTests(unittest.TestCase):
         )
         mpv_args = (bin_dir / "mpv.args").read_text()
         self.assertIn("--force-window=immediate --volume=30 --mute=no", mpv_args)
-        self.assertIn("--force-media-title=Big - hi -", mpv_args)
+        self.assertIn("--force-media-title=Big - hi", mpv_args)
+        self.assertIn("--cache=yes --demuxer-max-back-bytes=2300MiB", mpv_args)
 
     def test_muted_watch_keeps_the_volume_for_unmuting(self) -> None:
         bin_dir = self.fake_tools("printf video", "cat > /dev/null")
