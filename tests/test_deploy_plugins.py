@@ -15,15 +15,18 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 import deploy_plugins
 
 
-def git(root: Path, *arguments: str) -> str:
+def without_git_variables() -> dict[str, str]:
     # Git hooks export GIT_DIR and friends, which would point at this repository.
-    environment = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def git(root: Path, *arguments: str) -> str:
     return subprocess.run(
         ["git", "-C", str(root), *arguments],
         capture_output=True,
         text=True,
         check=True,
-        env=environment,
+        env=without_git_variables(),
     ).stdout.strip()
 
 
@@ -56,12 +59,12 @@ class LiveReleaseGuardTests(unittest.TestCase):
 
     def deploy(self, *arguments: str) -> tuple[int, str, str]:
         stdout, stderr = StringIO(), StringIO()
-        environment = {
+        environment = without_git_variables() | {
             "DMS_PLUGIN_DEPLOY_ROOT": str(self.deploy_root),
             "DMS_PLUGIN_DIR": str(self.plugin_dir),
         }
         with (
-            patch.dict(os.environ, environment),
+            patch.dict(os.environ, environment, clear=True),
             patch.object(deploy_plugins, "repository_root", return_value=self.root),
             patch.object(deploy_plugins, "repository_errors", return_value=[]),
             patch.object(deploy_plugins, "deployment_errors", return_value=[]),
