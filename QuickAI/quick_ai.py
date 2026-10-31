@@ -488,8 +488,7 @@ def check_installation() -> dict[str, Any]:
         openrouter_base() + "/key", headers={"Authorization": f"Bearer {token}"}
     )
     try:
-        with urllib.request.urlopen(request, timeout=8):
-            pass
+        urllib.request.urlopen(request, timeout=8).close()
     except urllib.error.HTTPError as error:
         error.close()
         return {
