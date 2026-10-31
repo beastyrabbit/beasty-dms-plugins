@@ -143,7 +143,7 @@ class OutputOnlyUiTests(unittest.TestCase):
         qml = DAEMON_PATH.read_text(encoding="utf-8")
         self.assertIn('text: "Better answer"', qml)
         self.assertIn("onClicked: root.submit(true)", qml)
-        self.assertIn('arguments.push("--better")', qml)
+        self.assertIn('command.push("--better")', qml)
 
 
 @patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-test-key"})

@@ -152,22 +152,25 @@ PluginComponent {
 
         const request = pendingRequest;
         pendingRequest = null;
-        const arguments = ["python3", helperPath, "--model", setting("fastModel"), "--effort", setting("thinking"), "--mode", request.mode, "--target", request.target];
+        const model = setting("fastModel");
+        const effort = setting("thinking");
+        const command = ["python3", helperPath, "--model", model, "--effort", effort, "--mode", request.mode, "--target", request.target];
         if (request.better)
-            arguments.push("--better");
+            command.push("--better");
+
         let input = null;
         if (request.clipboard && clipboardText) {
-            arguments.push("--stdin");
+            command.push("--stdin");
             input = clipboardText;
         } else if (request.clipboard) {
-            arguments.push("--clipboard");
+            command.push("--clipboard");
         } else {
-            arguments.push("--query", request.query);
+            command.push("--query", request.query);
         }
         activeProcess = requestProcess.createObject(root, {
             "requestGeneration": request.generation,
             "input": input,
-            "command": arguments
+            "command": command
         });
         activeProcess.running = true;
     }
