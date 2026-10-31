@@ -66,6 +66,13 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(policy.set_audio(False))
         self.assertEqual(policy.target(), "1080p60")
 
+    def test_audio_toggled_before_the_stream_list_still_switches(self) -> None:
+        policy = stream_quality.QualityPolicy(BEST, audio_only=False)
+        policy.set_audio(True)
+        policy.learn(AVAILABLE, 0)
+        self.assertEqual(policy.current, "1080p60")
+        self.assertEqual(policy.target(), "audio_only")
+
     def test_highest_quality_stays_put_while_buffering(self) -> None:
         policy = stream_quality.QualityPolicy(BEST, audio_only=False)
         policy.learn(AVAILABLE, 0)
@@ -391,6 +398,29 @@ class RelayTests(unittest.TestCase):
         relay.advance(0)
         self.assertFalse(relay.withdraw(new))
         self.assertIs(relay.current, new)
+
+    def test_a_pipe_closing_just_before_select_keeps_the_stream(self) -> None:
+        old, old_in = self.pipe_source("1080p60")
+        new, _ = self.pipe_source("480p30")
+        output = Collector()
+        relay = stream_quality.Relay(output, old)
+        relay.offer(new)
+        real_select = stream_quality.select.select
+
+        def cancel_then_select(*args):
+            # A cancelled switch closes the pending pipe after the relay
+            # picked its pipes but before it selects on them.
+            if not new.process.stdout.closed:
+                relay.withdraw(new)
+                new.process.stdout.close()
+            return real_select(*args)
+
+        with patch.object(stream_quality.select, "select", cancel_then_select):
+            relay.start()
+            old_in.write(segment(10, b"A") + segment(12, b"A"))
+            wait_until(lambda: output.data.startswith(segment(10, b"A")))
+        self.assertFalse(relay.finished.is_set())
+        old_in.close()
 
     def test_mpv_closing_ends_the_relay_without_the_stream_ending(self) -> None:
         old, old_in = self.pipe_source("1080p60")

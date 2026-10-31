@@ -202,6 +202,20 @@ class AvatarCacheTests(unittest.TestCase):
                 twitch_follows.cached_avatar(self.URL, self.dir, later), uri
             )
 
+    def test_slow_downloads_fall_back_to_the_url(self) -> None:
+        def slow(url, timeout):
+            time.sleep(0.5)
+            return io.BytesIO(b"late")
+
+        with (
+            patch.object(twitch_follows, "avatar_dir", lambda: self.dir),
+            patch.object(twitch_follows, "AVATAR_DEADLINE_SECONDS", 0.05),
+            patch.object(twitch_follows.urllib.request, "urlopen", slow),
+        ):
+            self.assertEqual(
+                twitch_follows.cache_avatars({"1": self.URL}), {"1": self.URL}
+            )
+
     def test_drops_avatars_nobody_live_has_used_for_a_week(self) -> None:
         old, recent = self.dir / "old.png", self.dir / "recent.png"
         old.write_bytes(b"x")
@@ -287,7 +301,7 @@ class LaunchTests(unittest.TestCase):
         mpv_args = (bin_dir / "mpv.args").read_text()
         self.assertIn("--force-window=immediate --volume=30 --mute=no", mpv_args)
         self.assertIn("--force-media-title=Big - hi", mpv_args)
-        self.assertIn("--cache-on-disk=yes --demuxer-max-back-bytes=2300MiB", mpv_args)
+        self.assertIn("--cache=yes --demuxer-max-back-bytes=2300MiB", mpv_args)
 
     def test_muted_watch_keeps_the_volume_for_unmuting(self) -> None:
         bin_dir = self.fake_tools("printf video", "cat > /dev/null")

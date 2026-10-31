@@ -26,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,8 @@ REQUEST_TIMEOUT_SECONDS = 10
 # refresh downloads them again once they are this old, and drops unused ones.
 AVATAR_MAX_AGE_SECONDS = 7 * 24 * 3600
 AVATAR_TIMEOUT_SECONDS = 5
+# All downloads together, well within the 30 seconds the list may take.
+AVATAR_DEADLINE_SECONDS = 10
 MAX_PAGES = 20
 CHATTERINO_FLATPAK_ID = "com.chatterino.chatterino"
 CHATTERINO_CLASSES = {CHATTERINO_FLATPAK_ID, "chatterino"}
@@ -263,12 +265,12 @@ def cache_avatars(urls: dict[str, str]) -> dict[str, str]:
     now = time.time()
     # Each URL once: channels without their own picture share Twitch's default.
     unique = list(dict.fromkeys(urls.values()))
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        local = dict(
-            zip(
-                unique, pool.map(lambda url: cached_avatar(url, directory, now), unique)
-            )
-        )
+    pool = ThreadPoolExecutor(max_workers=8)
+    futures = {url: pool.submit(cached_avatar, url, directory, now) for url in unique}
+    done, _ = wait(futures.values(), timeout=AVATAR_DEADLINE_SECONDS)
+    # Avatars still downloading load from Twitch this time.
+    local = {url: f.result() if f in done else url for url, f in futures.items()}
+    pool.shutdown(wait=False, cancel_futures=True)
     used = {Path(urllib.parse.urlparse(uri).path).name for uri in local.values()}
     with contextlib.suppress(OSError):
         for path in directory.iterdir():
@@ -658,10 +660,9 @@ def play(
         f"--volume={volume}",
         f"--mute={'yes' if muted else 'no'}",
         f"--force-media-title={media_title}",
-        # Keep up to 30 minutes to rewind (about 10 Mbit/s at 1080p60) in a
-        # temporary file rather than in memory.
+        # Keep up to 30 minutes to rewind (about 10 Mbit/s at 1080p60), in
+        # memory: on disk, mpv's limits only bound the index, not the file.
         "--cache=yes",
-        "--cache-on-disk=yes",
         f"--demuxer-max-back-bytes={REWIND_BUFFER}",
         f"--script={Path(__file__).with_name('twitch_buttons.lua')}",
     ]

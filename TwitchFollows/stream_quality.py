@@ -178,6 +178,8 @@ class QualityPolicy:
         self.preferred = preferred
         self.max_quality = True
         self.audio_only = audio_only
+        # What the first streamlink was asked for; the toggle may change first.
+        self.started_audio_only = audio_only
         self.has_audio = False
         # Video renditions at or below the setting, highest first.
         self.renditions: list[str] = []
@@ -201,7 +203,7 @@ class QualityPolicy:
         start = next((i for i, name in enumerate(video) if name in self.preferred), 0)
         self.renditions = video[start:]
         self.has_audio = AUDIO_ONLY in available
-        if self.audio_only and self.has_audio or not self.renditions:
+        if self.started_audio_only and self.has_audio or not self.renditions:
             self.current = AUDIO_ONLY
         else:
             self.current = self.renditions[0]
@@ -424,7 +426,10 @@ class Relay:
                     if self.pending and not self.pending_ended:
                         sources.append(self.pending)
                 pipes = {source.process.stdout: source for source in sources}
-                ready, _, _ = select.select(list(pipes), [], [], 0.1)
+                try:
+                    ready, _, _ = select.select(list(pipes), [], [], 0.1)
+                except (OSError, ValueError):
+                    continue  # a withdrawn source's pipe closed under us
                 for pipe in ready:
                     source = pipes[pipe]
                     try:
