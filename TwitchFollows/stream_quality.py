@@ -205,6 +205,8 @@ class QualityPolicy:
         self.has_audio = AUDIO_ONLY in available
         if self.started_audio_only and self.has_audio or not self.renditions:
             self.current = AUDIO_ONLY
+        elif self.started_audio_only:
+            self.current = self.renditions[-1]  # streamlink fell back to worst
         else:
             self.current = self.renditions[0]
         self.loaded(self.current, now)
@@ -710,6 +712,9 @@ class Switcher:
             return False
         self.pending.stop()
         self.pending = None
+        if self.relay.released and self.source.quality == AUDIO_ONLY:
+            # Video was already back on for the handoff; audio needs it off.
+            self.turn_video_off()
         return True
 
     def turn_video_off(self) -> None:

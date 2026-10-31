@@ -66,6 +66,13 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(policy.set_audio(False))
         self.assertEqual(policy.target(), "1080p60")
 
+    def test_audio_setting_without_an_audio_stream_plays_the_lowest(self) -> None:
+        policy = stream_quality.QualityPolicy(["audio_only", "worst"], audio_only=True)
+        policy.learn([s for s in AVAILABLE if s != "audio_only"], 0)
+        self.assertEqual(policy.current, "160p30")
+        policy.set_audio(False)
+        self.assertEqual(policy.target(), "1080p60")
+
     def test_audio_toggled_before_the_stream_list_still_switches(self) -> None:
         policy = stream_quality.QualityPolicy(BEST, audio_only=False)
         policy.set_audio(True)
@@ -603,6 +610,22 @@ class SwitcherTests(unittest.TestCase):
         self.switcher.close()
         self.first.process.kill.assert_called_once()
         self.started[0].process.kill.assert_not_called()
+
+    def test_audio_again_after_video_was_released_turns_video_off(self) -> None:
+        self.switcher.policy.set_audio(True)
+        self.switcher.update(1)
+        self.splice(2)
+        self.switcher.policy.set_audio(False)
+        self.switcher.update(3)
+        self.relay.awaiting_release = True
+        reply = {"request_id": stream_quality.BUFFERED_REQUEST_ID, "data": 0.5}
+        self.switcher.handle(reply, 4)
+        self.assertEqual(self.sent()[-1], ["set_property", "vid", "auto"])
+        self.relay.awaiting_release, self.relay.released = False, True
+        self.switcher.policy.set_audio(True)
+        self.switcher.update(5)
+        self.assertIsNone(self.switcher.pending)
+        self.assertEqual(self.sent()[-1], ["set_property", "vid", "no"])
 
     def test_changing_mind_mid_switch_cancels_it(self) -> None:
         self.switcher.policy.set_audio(True)

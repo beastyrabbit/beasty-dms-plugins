@@ -255,7 +255,7 @@ def cached_avatar(url: str, directory: Path, now: float) -> str:
         temporary = path.with_name(f"{path.name}.{os.getpid()}.new")
         temporary.write_bytes(data)
         os.replace(temporary, path)
-    except (OSError, http.client.HTTPException, TimeoutError):
+    except (OSError, http.client.HTTPException):  # timeouts are OSErrors
         return path.as_uri() if path.exists() else url
     return path.as_uri()
 
