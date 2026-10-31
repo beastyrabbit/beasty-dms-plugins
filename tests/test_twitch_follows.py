@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import io
 import json
@@ -190,7 +191,12 @@ class AvatarCacheTests(unittest.TestCase):
                 twitch_follows.cached_avatar(self.URL, self.dir, time.time()), self.URL
             )
         uri = self.cached(time.time())
-        with failing:
+        truncated = patch.object(
+            twitch_follows.urllib.request,
+            "urlopen",
+            side_effect=http.client.IncompleteRead(b"half"),
+        )
+        with failing, truncated:
             later = time.time() + twitch_follows.AVATAR_MAX_AGE_SECONDS + 1
             self.assertEqual(
                 twitch_follows.cached_avatar(self.URL, self.dir, later), uri
@@ -206,8 +212,10 @@ class AvatarCacheTests(unittest.TestCase):
             patch.object(twitch_follows, "avatar_dir", lambda: self.dir),
             patch.object(twitch_follows.urllib.request, "urlopen", self.urlopen),
         ):
-            avatars = twitch_follows.cache_avatars({"1": self.URL})
+            avatars = twitch_follows.cache_avatars({"1": self.URL, "2": self.URL})
         self.assertTrue(avatars["1"].startswith("file://"))
+        self.assertEqual(avatars["2"], avatars["1"])
+        self.assertEqual(self.downloads, 1)
         self.assertFalse(old.exists())
         self.assertTrue(recent.exists())
 

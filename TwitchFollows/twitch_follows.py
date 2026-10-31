@@ -11,6 +11,7 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -252,7 +253,7 @@ def cached_avatar(url: str, directory: Path, now: float) -> str:
         temporary = path.with_name(f"{path.name}.{os.getpid()}.new")
         temporary.write_bytes(data)
         os.replace(temporary, path)
-    except (OSError, urllib.error.URLError, TimeoutError):
+    except (OSError, http.client.HTTPException, TimeoutError):
         return path.as_uri() if path.exists() else url
     return path.as_uri()
 
@@ -260,11 +261,12 @@ def cached_avatar(url: str, directory: Path, now: float) -> str:
 def cache_avatars(urls: dict[str, str]) -> dict[str, str]:
     directory = avatar_dir()
     now = time.time()
+    # Each URL once: channels without their own picture share Twitch's default.
+    unique = list(dict.fromkeys(urls.values()))
     with ThreadPoolExecutor(max_workers=8) as pool:
         local = dict(
             zip(
-                urls,
-                pool.map(lambda url: cached_avatar(url, directory, now), urls.values()),
+                unique, pool.map(lambda url: cached_avatar(url, directory, now), unique)
             )
         )
     used = {Path(urllib.parse.urlparse(uri).path).name for uri in local.values()}
@@ -275,7 +277,7 @@ def cache_avatars(urls: dict[str, str]) -> dict[str, str]:
                 and now - path.stat().st_mtime > AVATAR_MAX_AGE_SECONDS
             ):
                 path.unlink(missing_ok=True)
-    return local
+    return {user: local[url] for user, url in urls.items()}
 
 
 def fetch_follows(account: dict[str, str]) -> dict[str, Any]:
