@@ -10,11 +10,11 @@ Personal [DMS](https://github.com/dangass/dms) plugins for Hyprland and niri.
 - **HyprlandWorkspaces** — rainbow Hyprland workspace switcher with named workspaces and scratchpads
 - **CatppuccinWorkspaces** — Catppuccin Mocha workspace indicator for niri (disabled)
 - **Quick AI** — type `?` for quick questions, translation, and input or clipboard summaries
-- **Twitch Follows** — bar count of live followed Twitch channels; the play button opens a stream in mpv, tabbed with its chat in Chatterino
+- **Twitch Follows** — bar count of live followed Twitch channels; click one to open it in mpv with its chat in Chatterino, or add it to an open group that shares one chat window
 
 ## Twitch Follows setup
 
-Twitch Follows reads the account you are logged in with in Chatterino (Flatpak or native), so it needs no Twitch app registration or separate token. If the Chatterino login expires, the dropdown says so; log in again in Chatterino. Streams play in their own mpv window through streamlink, with the channel's chat drawn in the bottom-left corner, including Twitch, 7TV, BTTV and FFZ emotes when `python-pillow` is installed (read anonymously over Twitch IRC; press `c` in mpv, or the chat button in the uosc control bar, to hide or show it). `End`, or the live button next to it, jumps back to live after pausing or seeking back. On Hyprland, the play button also opens a separate Chatterino window with only that channel and locks the two into one tab group, stream first. Closing the stream closes its chat tab, and your saved Chatterino layout is not changed.
+Twitch Follows reads the account you are logged in with in Chatterino (Flatpak or native), so it needs no Twitch app registration or separate token. If the Chatterino login expires, the dropdown says so; log in again in Chatterino. Streams play in their own mpv window through streamlink, with the channel's chat drawn in the bottom-left corner, including Twitch, 7TV, BTTV and FFZ emotes when `python-pillow` is installed (read anonymously over Twitch IRC; press `c` in mpv, or the chat button in the uosc control bar, to hide or show it). `End`, or the live button next to it, jumps back to live after pausing or seeking back. Click a channel to open it in a new viewing group (right-click opens it muted at the starting volume, so unmuting brings the sound back at that level; right-click works on the group buttons too). On Hyprland, a group is its streams plus one Chatterino window with only their channels. Every other channel then shows a numbered button per open group: click 1, 2, … to add that channel to the group, where its chat opens as another tab in the group's chat window. Channels you are watching show their group's number instead. With the [hyprweave](https://github.com/beastyrabbit/hyprweave) plugin loaded, a group's streams share the top 75% side by side (two in a row; three or four as 2×2; five or six as 3×2) with the chat across the bottom; fullscreen in mpv covers the screen with that stream alone. Without hyprweave, a group is a tab group. A stream that you close, or whose broadcast ends (also after a raid), leaves its group and takes its chat tab with it; the chat window closes with the group's last stream, and closing the chat window closes the group's streams. Your saved Chatterino layout is not changed. Shared chat windows need the chatterino-slim fork as `chatterino` on `PATH` (its `--instance` and `--slim` options); with the Flatpak, every stream gets its own chat window and group.
 
 ```bash
 sudo pacman -S streamlink python-pillow
@@ -22,7 +22,7 @@ dms ipc call plugin-scan scan
 dms ipc call plugins enable twitchFollows
 ```
 
-Then add the **Twitch Follows** widget to DankBar. DMS Settings → Plugins → Twitch Follows sets the stream quality, the starting volume (default 25%), the refresh interval (default 2 minutes), and whether chat is shown when a stream opens.
+Then add the **Twitch Follows** widget to DankBar. DMS Settings → Plugins → Twitch Follows sets the stream quality, the starting volume (default 30%), the refresh interval (default 2 minutes), and whether chat is shown when a stream opens.
 
 ## Quick AI setup
 

@@ -169,8 +169,13 @@ class LaunchTests(unittest.TestCase):
                 f'#!/bin/sh\necho "$@" > "{bin_dir}/{name}.args"\n{body}\n'
             )
             script.chmod(0o755)
+        # Tools a test adds later (hyprctl, chatterino) count once they exist.
         which = patch.object(
-            twitch_follows.shutil, "which", side_effect=lambda name: str(bin_dir / name)
+            twitch_follows.shutil,
+            "which",
+            side_effect=lambda name: (
+                str(bin_dir / name) if (bin_dir / name).exists() else None
+            ),
         )
         which.start()
         self.addCleanup(which.stop)
@@ -203,8 +208,13 @@ class LaunchTests(unittest.TestCase):
             ],
         )
         mpv_args = (bin_dir / "mpv.args").read_text()
-        self.assertIn("--force-window=immediate --volume=25", mpv_args)
+        self.assertIn("--force-window=immediate --volume=30 --mute=no", mpv_args)
         self.assertIn("--force-media-title=Big - hi -", mpv_args)
+
+    def test_muted_watch_keeps_the_volume_for_unmuting(self) -> None:
+        bin_dir = self.fake_tools("printf video", "cat > /dev/null")
+        twitch_follows.main(["--watch", "big", "--muted", "--no-chat-overlay"])
+        self.assertIn("--volume=30 --mute=yes", (bin_dir / "mpv.args").read_text())
 
     def test_watch_starts_chat_overlay_on_the_mpv_socket(self) -> None:
         bin_dir = self.fake_tools("printf video", "cat > /dev/null")
@@ -266,20 +276,28 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(twitch_follows.main(["--watch", "big"]), 0)
         popen.assert_not_called()
 
-    def test_watch_tabs_chatterino_behind_the_stream_and_closes_it_after(
-        self,
-    ) -> None:
-        bin_dir = self.fake_tools(
-            "printf video", f'echo $$ > "{self.runtime}/mpv.pid"; sleep 1; cat'
-        )
-        chat = bin_dir / "chatterino"
+    def fake_chat(self, bin_dir: Path, name: str = "chatterino") -> Path:
+        """A fake Chatterino: hands -c to a running instance (chat.pid) or
+        becomes it for 5 s; --remove quits it only if remove-quits exists.
+        A fake hyprctl lists an older Chatterino window, the mpv window by its
+        pid, another group's stream 0xc3, and the chat window 0xb2 while
+        chat.pid exists; it records Lua and closes the chat on window.close.
+        """
+        chat = bin_dir / name
         chat.write_text(
-            f'#!/bin/sh\necho "$@" > "{bin_dir}/chatterino.args"\n'
-            f'echo $$ > "{bin_dir}/chat.pid"\ntrap "exit 0" TERM\nsleep 5 & wait\n'
+            f"""#!/bin/sh
+d="{bin_dir}"
+echo "$@" >> "$d/chat.args"
+case "$*" in
+*--remove*) [ -f "$d/remove-quits" ] && kill "$(cat "$d/chat.pid")"; exit 0 ;;
+esac
+[ -f "$d/chat.pid" ] && kill -0 "$(cat "$d/chat.pid")" 2>/dev/null && exit 0
+echo $$ > "$d/chat.pid"
+trap "exit 0" TERM
+sleep "${{CHAT_LIFETIME:-5}}" & wait
+"""
         )
         chat.chmod(0o755)
-        # A fake hyprctl: lists an older Chatterino window, the mpv window by
-        # its pid, and the new Chatterino window once it started; records Lua.
         hyprctl = bin_dir / "hyprctl"
         hyprctl.write_text(
             f"""#!{sys.executable}
@@ -290,29 +308,163 @@ if sys.argv[1] == "repl":
     if "window.close" in sys.argv[2]:
         os.kill(int(open(os.path.join(d, "chat.pid")).read()), signal.SIGTERM)
     sys.exit(0)
-clients = [{{"address": "0xdead", "class": "com.chatterino.chatterino", "pid": 2}}]
+clients = [
+    {{"address": "0xdead", "class": "com.chatterino.chatterino", "pid": 2}},
+    {{"address": "0xc3", "class": "mpv", "pid": 4}},
+]
 mpv_pid = os.path.join({self.runtime!r}, "mpv.pid")
 if os.path.exists(mpv_pid):
     pid = int(open(mpv_pid).read())
     clients.append({{"address": "0xa1", "class": "mpv", "pid": pid}})
-if os.path.exists(os.path.join(d, "chat.pid")):
-    clients.append({{"address": "0xb2", "class": "chatterino", "pid": 3}})
+chat_pid = os.path.join(d, "chat.pid")
+if os.path.exists(chat_pid):
+    pid = int(open(chat_pid).read())
+    clients.append({{"address": "0xb2", "class": "chatterino", "pid": pid}})
 print(json.dumps(clients))
 """
         )
         hyprctl.chmod(0o755)
+        return chat
+
+    def groups(self) -> list[dict]:
+        return json.loads(
+            (Path(self.runtime) / "twitch-follows-groups.json").read_text()
+        )["groups"]
+
+    def test_grid_puts_streams_side_by_side_and_chat_below(self) -> None:
+        rows = [
+            [len(row) for row in twitch_follows.grid_rows(["0x1"] * n)]
+            for n in range(1, 7)
+        ]
+        self.assertEqual(rows, [[1], [2], [2, 1], [2, 2], [3, 2], [3, 3]])
+        spec = twitch_follows.weave_spec(["0xa", "0xb", "0xc"], "0xf")
+        self.assertEqual(spec["lock"], "none")
+        video, chat = spec["children"]
+        self.assertEqual(chat, {"window": "address:0xf", "size": 25})
+        self.assertEqual(video["size"], 75)
+        self.assertEqual(
+            video["children"],
+            [
+                {
+                    "direction": "row",
+                    "children": [
+                        {"window": "address:0xa"},
+                        {"window": "address:0xb"},
+                    ],
+                },
+                {"window": "address:0xc"},
+            ],
+        )
+
+    def test_first_stream_starts_a_group_with_its_own_chat_instance(self) -> None:
+        bin_dir = self.fake_tools(
+            "printf video", f'echo $$ > "{self.runtime}/mpv.pid"; sleep 1; cat'
+        )
+        chat = self.fake_chat(bin_dir)
+        (bin_dir / "remove-quits").touch()
         with patch.object(
             twitch_follows, "chatterino_command", return_value=[str(chat)]
         ):
+            started = time.monotonic()
             code = twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
         self.assertEqual(code, 0)
-        self.assertEqual(
-            (bin_dir / "chatterino.args").read_text().split(), ["-c", "t:big"]
+        self.assertLess(time.monotonic() - started, 4)
+        launch, remove = (bin_dir / "chat.args").read_text().splitlines()
+        self.assertRegex(
+            launch, r"^--slim --instance twitchfollows-[0-9a-f]{8} -c t:big$"
         )
-        group, close = (bin_dir / "repl").read_text().split("\n----\n")[:2]
-        self.assertIn('local S, C = "0xa1", "0xb2"', group)
-        self.assertIn("lock_active", group)
+        self.assertEqual(remove, launch.split(" -c")[0][7:] + " --remove t:big")
+        lua = (bin_dir / "repl").read_text().split("\n----\n")[0]
+        self.assertIn(' }, "0xa1"\n', lua)  # focus
+        self.assertIn("weave.create", lua)
+        self.assertIn('{ window = "address:0xa1", size = 75 }', lua)
+        self.assertIn('{ window = "address:0xb2", size = 25 }', lua)
+        self.assertIn('lock = "none"', lua)
+        self.assertEqual(self.groups(), [])
+
+    def test_flatpak_chat_gets_a_group_per_stream_and_closes_with_it(self) -> None:
+        bin_dir = self.fake_tools(
+            "printf video", f'echo $$ > "{self.runtime}/mpv.pid"; sleep 1; cat'
+        )
+        flatpak = self.fake_chat(bin_dir, "flatpak")
+        command = [str(flatpak), "run", "com.chatterino.chatterino"]
+        with patch.object(twitch_follows, "chatterino_command", return_value=command):
+            code = twitch_follows.main(["--watch", "big", "--group", "0123abcd"])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            (bin_dir / "chat.args").read_text(),
+            "run com.chatterino.chatterino -c t:big\n",
+        )
+        arranged, close = (bin_dir / "repl").read_text().split("\n----\n")[:2]
+        self.assertIn('{ window = "address:0xb2", size = 25 }', arranged)
         self.assertIn('window = "address:0xb2"', close)
+
+    def test_join_adds_a_tab_to_the_group_chat_and_rearranges(self) -> None:
+        bin_dir = self.fake_tools(
+            "printf video", f'echo $$ > "{self.runtime}/mpv.pid"; sleep 1; cat'
+        )
+        chat = self.fake_chat(bin_dir)
+        # The other stream's helper and the running chat instance.
+        other = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        (bin_dir / "chat.pid").write_text(str(other.pid))
+        twitch_follows.save_groups(
+            [
+                {
+                    "id": "0123abcd",
+                    "shared": True,
+                    "chat": "0xb2",
+                    "chatPid": other.pid,
+                    "streams": [{"login": "other", "pid": other.pid, "window": "0xc3"}],
+                }
+            ]
+        )
+        with patch.object(
+            twitch_follows, "chatterino_command", return_value=[str(chat)]
+        ):
+            code = twitch_follows.main(["--watch", "big", "--group", "0123abcd"])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            (bin_dir / "chat.args").read_text().splitlines(),
+            [
+                "--slim --instance twitchfollows-0123abcd -c t:big",
+                "--instance twitchfollows-0123abcd --remove t:big",
+            ],
+        )
+        joined, left = (bin_dir / "repl").read_text().split("\n----\n")[:2]
+        self.assertIn(
+            '{ direction = "row", children = { { window = "address:0xc3" }, '
+            '{ window = "address:0xa1" } }, size = 75 }',
+            joined,
+        )
+        self.assertIn(' }, "0xa1"\n', joined)  # focus
+        self.assertIn('{ window = "address:0xc3", size = 75 }', left)
+        self.assertIn(' }, ""\n', left)  # no focus
+        self.assertIsNone(other.poll())
+        self.assertEqual(
+            [s["login"] for g in self.groups() for s in g["streams"]], ["other"]
+        )
+
+    def test_closing_the_group_chat_closes_the_stream(self) -> None:
+        bin_dir = self.fake_tools(
+            "trap 'exit 1' TERM; sleep 10 & wait",
+            f'echo $$ > "{self.runtime}/mpv.pid"; exec sleep 10',
+        )
+        chat = self.fake_chat(bin_dir)
+        with (
+            patch.object(
+                twitch_follows, "chatterino_command", return_value=[str(chat)]
+            ),
+            patch.dict(twitch_follows.os.environ, {"CHAT_LIFETIME": "1"}),
+            patch.object(twitch_follows, "notify") as notify,
+        ):
+            started = time.monotonic()
+            code = twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+        self.assertEqual(code, 0)
+        self.assertLess(time.monotonic() - started, 5)
+        notify.assert_not_called()
+        self.assertEqual(self.groups(), [])
 
 
 if __name__ == "__main__":
