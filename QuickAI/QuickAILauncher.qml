@@ -14,7 +14,7 @@ Item {
         return [{
             "name": text ? "Ask: " + preview : "Quick Ask",
             "icon": "material:bolt",
-            "comment": text ? "Ask Terra now · low reasoning · web when needed" : "Type your question after ?",
+            "comment": text ? "Ask now · fast model · web when needed" : "Type your question after ?",
             "action": "open",
             "mode": "ask",
             "requestText": text,
@@ -22,7 +22,7 @@ Item {
         }, {
             "name": text ? "Translate: " + preview : "Quick Translate",
             "icon": "material:translate",
-            "comment": text ? "Translate English ↔ German with Terra" : "Type text after ?, then press ↓",
+            "comment": text ? "Translate English ↔ German" : "Type text after ?, then press ↓",
             "action": "open",
             "mode": "translate",
             "requestText": text,
@@ -30,7 +30,7 @@ Item {
         }, {
             "name": text ? "Summarize: " + preview : "Summarize Input",
             "icon": "material:summarize",
-            "comment": text ? "Summarize the input with Terra" : "Type text after ?, then select this option",
+            "comment": text ? "Summarize the input" : "Type text after ?, then select this option",
             "action": "open",
             "mode": "summarize",
             "requestText": text,
@@ -39,7 +39,7 @@ Item {
         }, {
             "name": "Summarize Clipboard",
             "icon": "material:content_paste",
-            "comment": "Send the current plain-text clipboard to Terra for summarization",
+            "comment": "Summarize the current plain-text clipboard",
             "action": "open",
             "mode": "summarize",
             "requestText": "",

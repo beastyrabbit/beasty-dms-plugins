@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import http.server
 import importlib.util
 import io
 import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
+import urllib.error
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
-
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "QuickAI" / "quick_ai.py"
@@ -22,69 +24,98 @@ sys.modules[SPEC.name] = quick_ai
 SPEC.loader.exec_module(quick_ai)
 
 
-class FakeProcess:
-    def __init__(self, stdout: str, stderr: str = "", returncode: int = 0):
-        self._stdout = stdout
-        self._stderr = stderr
-        self.returncode = returncode
-        self.pid = 12345
-
-    def communicate(
-        self, input: str | None = None, timeout: int = 0
-    ) -> tuple[str, str]:
-        self.input = input
-        self.timeout = timeout
-        return self._stdout, self._stderr
-
-    def poll(self) -> int:
-        return self.returncode
+def fake_response(payload: dict) -> io.StringIO:
+    return io.StringIO(json.dumps(payload))
 
 
-class CommandTests(unittest.TestCase):
-    def test_ask_uses_terra_search_low_and_standard_speed(self) -> None:
-        command = quick_ai.build_command("ask", "auto", "/tmp/work")
-        self.assertIn("gpt-5.6-terra", command)
-        self.assertIn("--search", command)
-        self.assertLess(command.index("--search"), command.index("exec"))
-        self.assertIn('model_reasoning_effort="low"', command)
-        self.assertIn("fast_mode", command)
-        self.assertNotIn("--output-schema", command)
-        self.assertEqual(command[-1], "-")
+def http_error(status: int, body: str = "") -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://openrouter.test", status, "error", {}, io.BytesIO(body.encode())
+    )
 
-    def test_translation_uses_terra_schema_without_search(self) -> None:
-        command = quick_ai.build_command("translate", "auto", "/tmp/work")
-        self.assertIn("gpt-5.6-terra", command)
-        self.assertNotIn("--search", command)
-        self.assertEqual(
-            command[command.index("--output-schema") + 1], str(quick_ai.SCHEMA_PATH)
+
+def chat_payload(content: str) -> dict:
+    return {"choices": [{"message": {"content": content}}]}
+
+
+def responses_payload(text: str) -> dict:
+    return {
+        "output": [
+            {"type": "web_search_call"},
+            {"type": "message", "content": [{"type": "output_text", "text": text}]},
+        ]
+    }
+
+
+TRANSLATION = {
+    "translation": "apple tree",
+    "sourceLanguage": "de",
+    "targetLanguage": "en",
+    "alternatives": [],
+    "grammar": "noun",
+    "usage": "common",
+    "ambiguityNote": "",
+    "ambiguous": False,
+}
+
+PROXY = {
+    "name": "CLIProxyAPI",
+    "base_url": "http://proxy.test:8317/v1",
+    "experimental_bearer_token": "proxy-token",
+    "wire_api": "responses",
+}
+
+
+class FastRequestTests(unittest.TestCase):
+    def test_ask_uses_deepseek_without_thinking_and_search_tool(self) -> None:
+        body = quick_ai.fast_request("ask", "prompt", quick_ai.DEFAULT_MODEL, "off")
+        self.assertEqual(body["model"], "deepseek/deepseek-v4.1-flash")
+        self.assertEqual(body["reasoning"], {"enabled": False})
+        self.assertEqual(body["provider"], {"sort": "latency"})
+        self.assertEqual(body["tools"][0]["type"], "openrouter:web_search")
+        self.assertNotIn("response_format", body)
+
+    def test_thinking_level_is_passed_as_effort(self) -> None:
+        body = quick_ai.fast_request("ask", "prompt", "z-ai/glm-5.3-flash", "low")
+        self.assertEqual(body["reasoning"], {"effort": "low"})
+
+    def test_translation_requires_strict_schema_without_search(self) -> None:
+        body = quick_ai.fast_request(
+            "translate", "prompt", quick_ai.DEFAULT_MODEL, "off"
         )
-        self.assertNotIn("apfelbaum", command)
-        self.assertEqual(command[-1], "-")
-        self.assertEqual(quick_ai.TRANSLATE_TIMEOUT_SECONDS, 30)
+        self.assertNotIn("tools", body)
+        self.assertTrue(body["provider"]["require_parameters"])
+        schema = body["response_format"]["json_schema"]
+        self.assertTrue(schema["strict"])
+        self.assertNotIn("$schema", schema["schema"])
+        self.assertIn("translation", schema["schema"]["required"])
 
-    def test_summary_uses_terra_without_search_or_schema(self) -> None:
-        command = quick_ai.build_command("summarize", "auto", "/tmp/work")
-        self.assertIn("gpt-5.6-terra", command)
-        self.assertNotIn("--search", command)
-        self.assertNotIn("--output-schema", command)
-        self.assertEqual(command[-1], "-")
+    def test_summary_has_no_search_or_schema(self) -> None:
+        body = quick_ai.fast_request(
+            "summarize", "prompt", quick_ai.DEFAULT_MODEL, "off"
+        )
+        self.assertNotIn("tools", body)
+        self.assertNotIn("response_format", body)
 
-    def test_query_is_not_exposed_in_process_arguments(self) -> None:
-        query = 'hello; echo "$HOME"'
-        command = quick_ai.build_command("ask", "auto", "/tmp/work")
-        self.assertNotIn(query, command)
-        self.assertNotIn("sh", command)
 
-    @patch.object(quick_ai.shutil, "which", return_value=None)
-    @patch.object(quick_ai.Path, "home")
-    def test_resolves_npm_global_codex_for_dms_path(self, home, _which) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home.return_value = Path(directory)
-            executable = Path(directory) / ".npm-global" / "bin" / "codex"
-            executable.parent.mkdir(parents=True)
-            executable.write_text("#!/bin/sh\n", encoding="utf-8")
-            executable.chmod(0o700)
-            self.assertEqual(quick_ai.resolve_codex(), str(executable))
+class BetterRequestTests(unittest.TestCase):
+    def test_ask_uses_sol_medium_with_web_search(self) -> None:
+        body = quick_ai.better_request("ask", "prompt")
+        self.assertEqual(body["model"], "gpt-6.1-sol")
+        self.assertEqual(body["reasoning"], {"effort": "medium"})
+        self.assertEqual(body["tools"], [{"type": "web_search"}])
+        self.assertFalse(body["store"])
+
+    def test_translation_uses_strict_schema(self) -> None:
+        body = quick_ai.better_request("translate", "prompt")
+        self.assertNotIn("tools", body)
+        self.assertEqual(body["text"]["format"]["type"], "json_schema")
+        self.assertTrue(body["text"]["format"]["strict"])
+
+    def test_summary_has_no_search_or_schema(self) -> None:
+        body = quick_ai.better_request("summarize", "prompt")
+        self.assertNotIn("tools", body)
+        self.assertNotIn("text", body)
 
 
 class StructuredOutputTests(unittest.TestCase):
@@ -102,103 +133,126 @@ class OutputOnlyUiTests(unittest.TestCase):
         self.assertIn("event.key === Qt.Key_Escape", qml)
         self.assertIn("quickModal.close()", qml)
 
+    def test_better_answer_button_reruns_with_better_flag(self) -> None:
+        qml = DAEMON_PATH.read_text(encoding="utf-8")
+        self.assertIn('text: "Better answer"', qml)
+        self.assertIn("onClicked: root.submit(true)", qml)
+        self.assertIn('arguments.push("--better")', qml)
 
-class ResponseTests(unittest.TestCase):
-    def setUp(self) -> None:
-        patcher = patch.object(quick_ai, "proxy_provider", return_value=None)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
-    @patch.object(quick_ai.subprocess, "Popen")
-    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
-    def test_ask_success(self, _resolve, popen) -> None:
-        popen.return_value = FakeProcess("A short answer")
+@patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-test-key"})
+class FastResponseTests(unittest.TestCase):
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_ask_success(self, urlopen) -> None:
+        urlopen.return_value.__enter__.return_value = fake_response(
+            chat_payload("A short answer")
+        )
         result = quick_ai.execute("ask", "Question", "auto")
         self.assertTrue(result["ok"])
         self.assertEqual(result["answer"], "A short answer")
-        self.assertEqual(result["model"], "gpt-5.6-terra")
-        self.assertIs(popen.call_args.kwargs["stdin"], quick_ai.subprocess.PIPE)
-        self.assertTrue(popen.call_args.kwargs["start_new_session"])
-        self.assertIn("Question", popen.return_value.input)
+        self.assertEqual(result["model"], quick_ai.DEFAULT_MODEL)
+        self.assertFalse(result["better"])
+        request = urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url, "https://openrouter.ai/api/v1/chat/completions"
+        )
+        self.assertEqual(request.get_header("Authorization"), "Bearer or-test-key")
+        self.assertIn("Question", json.loads(request.data)["messages"][0]["content"])
 
-    @patch.object(quick_ai.subprocess, "Popen")
-    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
-    def test_translation_success(self, _resolve, popen) -> None:
-        payload = {
-            "translation": "apple tree",
-            "sourceLanguage": "de",
-            "targetLanguage": "en",
-            "alternatives": [],
-            "grammar": "noun",
-            "usage": "common",
-            "ambiguityNote": "",
-            "ambiguous": False,
-        }
-        popen.return_value = FakeProcess(json.dumps(payload))
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_translation_success(self, urlopen) -> None:
+        urlopen.return_value.__enter__.return_value = fake_response(
+            chat_payload(json.dumps(TRANSLATION))
+        )
         result = quick_ai.execute("translate", "apfelbaum", "auto")
         self.assertTrue(result["ok"])
         self.assertEqual(result["result"]["translation"], "apple tree")
-        self.assertIn("apfelbaum", popen.return_value.input)
 
-    @patch.object(quick_ai.subprocess, "Popen")
-    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
-    def test_summary_success(self, _resolve, popen) -> None:
-        popen.return_value = FakeProcess("Overview.\n\n- First point")
-        result = quick_ai.execute("summarize", "A long source", "auto")
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["answer"], "Overview.\n\n- First point")
-        self.assertIn("A long source", popen.return_value.input)
-        self.assertNotIn("--search", popen.call_args.args[0])
-
-    @patch.object(quick_ai, "terminate_child")
-    @patch.object(quick_ai.subprocess, "Popen")
-    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
-    def test_translation_timeout_is_friendly(self, _resolve, popen, terminate) -> None:
-        process = FakeProcess("")
-        process.communicate = unittest.mock.Mock(
-            side_effect=quick_ai.subprocess.TimeoutExpired([], 30)
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_malformed_translation_is_friendly(self, urlopen) -> None:
+        urlopen.return_value.__enter__.return_value = fake_response(
+            chat_payload("not json")
         )
-        popen.return_value = process
-        result = quick_ai.execute("translate", "apfelbaum", "auto")
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["code"], "timeout")
-        self.assertIn("30 seconds", result["message"])
-        terminate.assert_called_once()
-
-    @patch.object(quick_ai.subprocess, "Popen")
-    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
-    def test_malformed_translation_is_friendly(self, _resolve, popen) -> None:
-        popen.return_value = FakeProcess("not json")
         result = quick_ai.execute("translate", "Entwurf", "auto")
         self.assertFalse(result["ok"])
         self.assertEqual(result["code"], "invalid_response")
 
-    def test_error_mapping(self) -> None:
-        self.assertEqual(
-            quick_ai.friendly_error("rate limit exceeded", 1)[0], "rate_limit"
-        )
-        self.assertEqual(
-            quick_ai.friendly_error("network connection failed", 1)[0], "network"
-        )
-        self.assertEqual(quick_ai.friendly_error("login required", 1)[0], "auth")
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_empty_answer_is_friendly(self, urlopen) -> None:
+        urlopen.return_value.__enter__.return_value = fake_response(chat_payload(""))
+        result = quick_ai.execute("ask", "Question", "auto")
+        self.assertEqual(result["code"], "empty")
 
-    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
-    @patch.object(quick_ai.subprocess, "run")
-    def test_installation_check_accepts_login_on_stderr(self, run, _resolve) -> None:
-        run.side_effect = [
-            quick_ai.subprocess.CompletedProcess([], 0, "", "Logged in using ChatGPT"),
-            quick_ai.subprocess.CompletedProcess([], 0, "gpt-5.6-terra\n", ""),
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_timeout_is_friendly(self, urlopen) -> None:
+        urlopen.side_effect = TimeoutError()
+        result = quick_ai.execute("translate", "apfelbaum", "auto")
+        self.assertEqual(result["code"], "timeout")
+        self.assertIn("30 seconds", result["message"])
+
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_network_error_is_friendly(self, urlopen) -> None:
+        urlopen.side_effect = urllib.error.URLError("dns failure")
+        result = quick_ai.execute("ask", "Question", "auto")
+        self.assertEqual(result["code"], "network")
+
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_http_errors_are_friendly(self, urlopen) -> None:
+        cases = [
+            (401, '{"error":{"message":"User not found."}}', "auth"),
+            (402, "", "credits"),
+            (429, "", "rate_limit"),
+            (
+                400,
+                '{"error":{"message":"Reasoning is mandatory for this endpoint"}}',
+                "effort",
+            ),
+            (404, "", "model"),
+            (500, "", "http"),
         ]
-        self.assertEqual(quick_ai.check_installation(), {"ok": True})
+        for status, body, code in cases:
+            with self.subTest(status=status):
+                urlopen.side_effect = http_error(status, body)
+                result = quick_ai.execute("ask", "Question", "auto")
+                self.assertEqual(result["code"], code)
+
+    def test_missing_key_is_friendly(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            result = quick_ai.execute("ask", "Question", "auto")
+        self.assertEqual(result["code"], "auth")
+        self.assertIn("OPENROUTER_API_KEY", result["message"])
 
 
-PROXY = {
-    "name": "CLIProxyAPI",
-    "base_url": "http://proxy.test:8317/v1",
-    "experimental_bearer_token": "test-token",
-    "wire_api": "responses",
-    "supports_websockets": True,
-}
+class BetterResponseTests(unittest.TestCase):
+    @patch.object(quick_ai, "proxy_provider", return_value=PROXY)
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_better_answer_uses_proxy_responses(self, urlopen, _provider) -> None:
+        urlopen.return_value.__enter__.return_value = fake_response(
+            responses_payload("A better answer")
+        )
+        result = quick_ai.execute("ask", "Question", "auto", better=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["answer"], "A better answer")
+        self.assertEqual(result["model"], "gpt-6.1-sol")
+        self.assertTrue(result["better"])
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://proxy.test:8317/v1/responses")
+        self.assertEqual(request.get_header("Authorization"), "Bearer proxy-token")
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 90)
+
+    @patch.object(quick_ai, "proxy_provider", return_value=PROXY)
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_better_translation_parses_schema_output(self, urlopen, _provider) -> None:
+        urlopen.return_value.__enter__.return_value = fake_response(
+            responses_payload(json.dumps(TRANSLATION))
+        )
+        result = quick_ai.execute("translate", "apfelbaum", "auto", better=True)
+        self.assertEqual(result["result"]["translation"], "apple tree")
+
+    @patch.object(quick_ai, "proxy_provider", return_value=None)
+    def test_missing_proxy_is_friendly(self, _provider) -> None:
+        result = quick_ai.execute("ask", "Question", "auto", better=True)
+        self.assertEqual(result["code"], "proxy")
 
 
 class ProxyProviderTests(unittest.TestCase):
@@ -214,7 +268,7 @@ class ProxyProviderTests(unittest.TestCase):
                 provider = quick_ai.proxy_provider()
         self.assertEqual(provider, {"base_url": "http://proxy.test:8317/v1"})
 
-    def test_builtin_provider_needs_no_proxy(self) -> None:
+    def test_builtin_provider_has_no_proxy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "config.toml").write_text(
                 'model = "gpt-6.1-sol"\n', encoding="utf-8"
@@ -222,114 +276,58 @@ class ProxyProviderTests(unittest.TestCase):
             with patch.dict(os.environ, {"CODEX_HOME": directory}):
                 self.assertIsNone(quick_ai.proxy_provider())
 
-    def test_command_routes_through_proxy_without_exposing_token(self) -> None:
-        command = quick_ai.build_command("ask", "auto", "/tmp/work", provider=PROXY)
-        joined = " ".join(command)
-        self.assertIn('model_provider="quick-ai-proxy"', command)
-        self.assertIn(
-            'model_providers.quick-ai-proxy.base_url="http://proxy.test:8317/v1"',
-            command,
-        )
-        self.assertIn(
-            'model_providers.quick-ai-proxy.env_key="QUICK_AI_PROVIDER_TOKEN"',
-            command,
-        )
-        self.assertIn(
-            "model_providers.quick-ai-proxy.supports_websockets=true", command
-        )
-        self.assertNotIn("test-token", joined)
-        self.assertEqual(command[-1], "-")
 
-    @patch.object(quick_ai.subprocess, "Popen")
-    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
-    @patch.object(quick_ai, "proxy_provider", return_value=PROXY)
-    def test_token_is_passed_through_environment(
-        self, _provider, _resolve, popen
-    ) -> None:
-        popen.return_value = FakeProcess("A short answer")
-        result = quick_ai.execute("ask", "Question", "auto")
-        self.assertTrue(result["ok"])
-        self.assertEqual(
-            popen.call_args.kwargs["env"]["QUICK_AI_PROVIDER_TOKEN"], "test-token"
-        )
-        self.assertNotIn("test-token", " ".join(popen.call_args.args[0]))
-
-    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
-    @patch.object(quick_ai, "proxy_provider", return_value=PROXY)
+class CheckTests(unittest.TestCase):
+    @patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-test-key"})
     @patch.object(quick_ai.urllib.request, "urlopen")
-    def test_check_uses_proxy_model_list(self, urlopen, _provider, _resolve) -> None:
-        urlopen.return_value.__enter__.return_value = io.StringIO(
-            json.dumps({"data": [{"id": "gpt-5.6-terra"}]})
-        )
+    def test_check_validates_key(self, urlopen) -> None:
+        urlopen.return_value.__enter__.return_value = fake_response({"data": {}})
         self.assertEqual(quick_ai.check_installation(), {"ok": True})
         request = urlopen.call_args.args[0]
-        self.assertEqual(request.full_url, "http://proxy.test:8317/v1/models")
-        self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+        self.assertEqual(request.full_url, "https://openrouter.ai/api/v1/key")
 
-    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
-    @patch.object(quick_ai, "proxy_provider", return_value=PROXY)
+    @patch.dict(os.environ, {"OPENROUTER_API_KEY": "dead-key"})
     @patch.object(quick_ai.urllib.request, "urlopen")
-    def test_check_reports_missing_proxy_model(
-        self, urlopen, _provider, _resolve
-    ) -> None:
-        urlopen.return_value.__enter__.return_value = io.StringIO(
-            json.dumps({"data": [{"id": "gpt-6.1-sol"}]})
-        )
+    def test_check_reports_rejected_key(self, urlopen) -> None:
+        urlopen.side_effect = http_error(401)
         result = quick_ai.check_installation()
         self.assertFalse(result["ok"])
-        self.assertIn("CLIProxyAPI", result["message"])
+        self.assertIn("HTTP 401", result["message"])
+
+    def test_check_reports_missing_key(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            result = quick_ai.check_installation()
+        self.assertFalse(result["ok"])
+        self.assertIn("OPENROUTER_API_KEY", result["message"])
 
 
 class ModelSelectionTests(unittest.TestCase):
-    def test_selected_model_is_used(self) -> None:
-        command = quick_ai.build_command(
-            "ask", "auto", "/tmp/work", model="claude-haiku-5-5"
-        )
-        self.assertEqual(command[command.index("--model") + 1], "claude-haiku-5-5")
-
-    def test_selected_effort_is_used(self) -> None:
-        command = quick_ai.build_command("ask", "auto", "/tmp/work", effort="high")
-        self.assertIn('model_reasoning_effort="high"', command)
-
     def test_empty_effort_falls_back_to_default(self) -> None:
         args = quick_ai.parse_args(["--effort", "", "--mode", "ask", "--query", "x"])
-        self.assertEqual(args.effort, quick_ai.DEFAULT_EFFORT)
+        self.assertEqual(args.effort, "off")
 
     def test_unknown_effort_is_rejected(self) -> None:
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             quick_ai.parse_args(["--effort", "ultra", "--mode", "ask", "--query", "x"])
 
-    def test_unsupported_effort_error_is_friendly(self) -> None:
-        stderr = "Unsupported value: 'max' is not supported for reasoning.effort"
-        self.assertEqual(quick_ai.friendly_error(stderr, 1)[0], "effort")
-
     def test_empty_model_falls_back_to_default(self) -> None:
         args = quick_ai.parse_args(["--model", "", "--mode", "ask", "--query", "x"])
         self.assertEqual(args.model, quick_ai.DEFAULT_MODEL)
+
+    def test_openrouter_model_ids_are_accepted(self) -> None:
+        args = quick_ai.parse_args(
+            ["--model", "z-ai/glm-5.3-flash", "--mode", "ask", "--query", "x"]
+        )
+        self.assertEqual(args.model, "z-ai/glm-5.3-flash")
 
     def test_invalid_model_is_rejected(self) -> None:
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             quick_ai.parse_args(["--model", "-c x", "--mode", "ask", "--query", "x"])
 
-    @patch.object(quick_ai, "proxy_provider", return_value=PROXY)
-    @patch.object(quick_ai.urllib.request, "urlopen")
-    def test_lists_proxy_text_models_only(self, urlopen, _provider) -> None:
-        ids = ["gpt-6.1-sol", "gpt-image-2", "codex-auto-review", "claude-haiku-5-5"]
-        urlopen.return_value.__enter__.return_value = io.StringIO(
-            json.dumps({"data": [{"id": model} for model in ids]})
-        )
-        result = quick_ai.list_models()
-        self.assertEqual(result["models"], ["claude-haiku-5-5", "gpt-6.1-sol"])
-        self.assertEqual(result["default"], quick_ai.DEFAULT_MODEL)
-
-    @patch.object(quick_ai, "resolve_codex", return_value="/usr/bin/codex")
-    @patch.object(quick_ai, "proxy_provider", return_value=PROXY)
-    @patch.object(quick_ai.urllib.request, "urlopen")
-    def test_check_validates_selected_model(self, urlopen, _provider, _resolve) -> None:
-        urlopen.return_value.__enter__.return_value = io.StringIO(
-            json.dumps({"data": [{"id": "claude-haiku-5-5"}]})
-        )
-        self.assertEqual(quick_ai.check_installation("claude-haiku-5-5"), {"ok": True})
+    def test_settings_list_matches_helper_list(self) -> None:
+        qml = (ROOT / "QuickAI" / "QuickAISettings.qml").read_text(encoding="utf-8")
+        for model in quick_ai.FAST_MODELS:
+            self.assertIn(f'"{model}"', qml)
 
 
 class ArgumentTests(unittest.TestCase):
@@ -383,52 +381,43 @@ class ClipboardTests(unittest.TestCase):
         self.assertIn("does not contain plain text", error)
 
 
-class DmsProcessIntegrationTests(unittest.TestCase):
-    def test_open_parent_stdin_is_not_forwarded_to_codex(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            fake_codex = Path(directory) / "codex"
-            fake_codex.write_text(
-                "#!/usr/bin/env python3\n"
-                "import sys\n"
-                "sys.stdin.read()\n"
-                "print('A short answer')\n",
-                encoding="utf-8",
-            )
-            fake_codex.chmod(0o700)
-            environment = dict(os.environ)
-            environment["QUICK_AI_CODEX"] = str(fake_codex)
-            environment["CODEX_HOME"] = directory
-            process = quick_ai.subprocess.Popen(
-                [
-                    sys.executable,
-                    str(MODULE_PATH),
-                    "--mode",
-                    "ask",
-                    "--query",
-                    "Question",
-                ],
-                stdin=quick_ai.subprocess.PIPE,
-                stdout=quick_ai.subprocess.PIPE,
-                stderr=quick_ai.subprocess.PIPE,
-                text=True,
-                env=environment,
-            )
-            try:
-                return_code = process.wait(timeout=4)
-                output = process.stdout.read() if process.stdout else ""
-                if process.stderr:
-                    process.stderr.read()
-            except quick_ai.subprocess.TimeoutExpired:
-                process.terminate()
-                process.wait(timeout=2)
-                self.fail("helper forwarded DMS's open stdin pipe to Codex")
-            finally:
-                for stream in (process.stdin, process.stdout, process.stderr):
-                    if stream:
-                        stream.close()
+class FakeOpenRouter(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        body = json.dumps(chat_payload("A short answer")).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-            self.assertEqual(return_code, 0)
-            self.assertEqual(json.loads(output)["answer"], "A short answer")
+    def log_message(self, *_args) -> None:
+        pass
+
+
+class DmsProcessIntegrationTests(unittest.TestCase):
+    def test_helper_answers_with_open_parent_stdin(self) -> None:
+        server = http.server.HTTPServer(("127.0.0.1", 0), FakeOpenRouter)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        environment = dict(os.environ)
+        environment["OPENROUTER_API_KEY"] = "or-test-key"
+        environment["QUICK_AI_OPENROUTER_URL"] = (
+            f"http://127.0.0.1:{server.server_port}/api/v1"
+        )
+        # DMS keeps the helper's stdin open; the helper must not wait on it.
+        process = quick_ai.subprocess.run(
+            [sys.executable, str(MODULE_PATH), "--mode", "ask", "--query", "Question"],
+            stdin=quick_ai.subprocess.PIPE,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=4,
+        )
+        self.assertEqual(process.returncode, 0)
+        self.assertEqual(json.loads(process.stdout)["answer"], "A short answer")
 
 
 if __name__ == "__main__":

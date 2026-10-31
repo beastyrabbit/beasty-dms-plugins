@@ -26,9 +26,12 @@ PluginComponent {
     property var activeProcess: null
     property bool autoRunOnOpen: false
     property bool clipboardSource: false
+    property bool better: false
     property double lastNonce: -1
     readonly property string helperPath: Paths.strip(Qt.resolvedUrl("quick_ai.py"))
     readonly property int queryLimit: mode === "ask" ? 4000 : (mode === "translate" ? 1200 : 24000)
+    readonly property string defaultModel: "deepseek/deepseek-v4.1-flash"
+    readonly property string betterModelLabel: "GPT-6.1 Sol · Medium"
 
     function displayTitle() {
         if (mode === "translate")
@@ -50,17 +53,32 @@ PluginComponent {
         return "bolt";
     }
 
+    function setting(key) {
+        return pluginService ? pluginService.loadPluginData("quickAi", key, "") : "";
+    }
+
+    function modelLabel() {
+        if (better)
+            return betterModelLabel;
+
+        const model = setting("fastModel") || defaultModel;
+        return model.slice(model.indexOf("/") + 1);
+    }
+
     function displaySubtitle() {
         if (mode === "translate")
-            return "Terra · Low · Standard · English ↔ German";
+            return modelLabel() + " · English ↔ German";
 
         if (mode === "summarize")
-            return "Terra · Low · Standard · " + (clipboardSource ? "Clipboard" : "Input");
+            return modelLabel() + " · " + (clipboardSource ? "Clipboard" : "Input");
 
-        return "Terra · Low · Standard · Web when needed";
+        return modelLabel() + " · Web when needed";
     }
 
     function loadingText() {
+        if (better)
+            return "Asking " + betterModelLabel + "… " + elapsedSeconds + "s";
+
         if (mode === "translate")
             return "Translating… " + elapsedSeconds + "s";
 
@@ -84,6 +102,7 @@ PluginComponent {
         cancelRequest();
         mode = requestedMode;
         clipboardSource = requestedClipboard;
+        better = false;
         targetLanguage = "auto";
         inputText = requestedClipboard ? "" : text;
         answer = "";
@@ -96,18 +115,20 @@ PluginComponent {
         quickModal.open();
     }
 
-    function submit() {
+    function submit(useBetter) {
         const text = inputText.trim();
         if ((!text && !clipboardSource) || text.length > queryLimit)
             return ;
 
         generation += 1;
+        better = useBetter === true;
         pendingRequest = {
             "generation": generation,
             "mode": mode,
             "target": targetLanguage,
             "query": text,
-            "clipboard": clipboardSource
+            "clipboard": clipboardSource,
+            "better": better
         };
         answer = "";
         translation = ({
@@ -129,9 +150,9 @@ PluginComponent {
 
         const request = pendingRequest;
         pendingRequest = null;
-        const model = pluginService ? pluginService.loadPluginData("quickAi", "model", "") : "";
-        const effort = pluginService ? pluginService.loadPluginData("quickAi", "effort", "") : "";
-        const arguments = ["python3", helperPath, "--model", model, "--effort", effort, "--mode", request.mode, "--target", request.target];
+        const arguments = ["python3", helperPath, "--model", setting("fastModel"), "--effort", setting("thinking"), "--mode", request.mode, "--target", request.target];
+        if (request.better)
+            arguments.push("--better");
         if (request.clipboard)
             arguments.push("--clipboard");
         else
@@ -183,7 +204,7 @@ PluginComponent {
         elapsedMs = payload.elapsedMs || 0;
         if (!payload.ok) {
             status = payload.code === "cancelled" ? "idle" : "error";
-            errorMessage = payload.message || "Codex could not complete the request.";
+            errorMessage = payload.message || "Quick AI could not complete the request.";
             return ;
         }
         if (payload.mode === "translate")
@@ -222,6 +243,7 @@ PluginComponent {
         elapsedMs = 0;
         elapsedSeconds = 0;
         clipboardSource = false;
+        better = false;
     }
 
     Component.onCompleted: {
@@ -596,7 +618,7 @@ PluginComponent {
 
                         StyledText {
                             visible: root.status === "ready" && root.elapsedMs > 0
-                            text: (root.elapsedMs / 1000).toFixed(1) + "s"
+                            text: (root.elapsedMs / 1000).toFixed(1) + "s · " + root.modelLabel()
                             color: Theme.surfaceTextSecondary
                             font.pixelSize: Theme.fontSizeSmall
                         }
@@ -613,6 +635,16 @@ PluginComponent {
                             backgroundColor: Theme.surfaceContainerHigh
                             textColor: Theme.surfaceText
                             onClicked: quickModal.close()
+                        }
+
+                        DankButton {
+                            visible: (root.status === "ready" || root.status === "error") && !root.better
+                            text: "Better answer"
+                            iconName: "auto_awesome"
+                            buttonHeight: 36
+                            backgroundColor: Theme.primaryContainer
+                            textColor: Theme.primary
+                            onClicked: root.submit(true)
                         }
 
                         DankButton {

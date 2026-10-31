@@ -5,8 +5,7 @@ import qs.Services
 QtObject {
     function check(done) {
         const helperPath = Paths.strip(Qt.resolvedUrl("quick_ai.py"));
-        const model = PluginService.loadPluginData("quickAi", "model", "");
-        Proc.runCommand("quickAi.check", ["python3", helperPath, "--check", "--model", model], (output, exitCode) => {
+        Proc.runCommand("quickAi.check", ["python3", helperPath, "--check"], (output, exitCode) => {
             let result = null;
             try {
                 result = JSON.parse(output.trim());
@@ -16,7 +15,7 @@ QtObject {
             if (exitCode !== 0 || !result || !result.ok) {
                 done({
                     "title": "Quick AI could not start",
-                    "details": result && result.message ? result.message : "Could not inspect the Codex installation. Confirm Python and Codex are installed, then enable the plugin again."
+                    "details": result && result.message ? result.message : "Could not check the OpenRouter key. Confirm Python is installed and OPENROUTER_API_KEY is set, then enable the plugin again."
                 });
                 return ;
             }

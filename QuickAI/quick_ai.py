@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Isolated Codex CLI adapter for the Quick AI DMS plugin."""
+"""Model adapter for the Quick AI DMS plugin.
+
+Fast answers come from OpenRouter. "Better answer" reruns the request on
+GPT-6.1 Sol through the CLIProxyAPI provider configured for Codex.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +12,7 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
-import tempfile
 import time
 import tomllib
 import urllib.error
@@ -18,23 +20,37 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-DEFAULT_MODEL = "gpt-5.6-terra"
-EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-DEFAULT_EFFORT = "low"
-MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$")
-# Proxy models that cannot answer text prompts through `codex exec`.
-UNUSABLE_MODEL_PATTERN = re.compile(r"image|auto-review")
-ASK_TIMEOUT_SECONDS = 30
-TRANSLATE_TIMEOUT_SECONDS = 30
-SUMMARY_TIMEOUT_SECONDS = 30
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
+DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash"
+# Benchmarked on 2026-10-31 as the fastest OpenRouter models for short answers.
+FAST_MODELS = (
+    "deepseek/deepseek-v4.1-flash",
+    "deepseek/deepseek-v4.1-flash-1017",
+    "xiaomi/mimo-v2.6-flash",
+    "z-ai/glm-5.3-flash",
+    "google/gemini-3.5-flash-lite",
+    "anthropic/claude-haiku-5.5",
+)
+EFFORTS = ("off", "low", "medium", "high")
+DEFAULT_EFFORT = "off"
+BETTER_MODEL = "gpt-6.1-sol"
+BETTER_EFFORT = "medium"
+MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
+FAST_TIMEOUT_SECONDS = 30
+BETTER_TIMEOUT_SECONDS = 90
+SEARCH_MAX_RESULTS = 3
 MAX_ASK_CHARS = 4000
 MAX_TRANSLATE_CHARS = 1200
 MAX_SUMMARY_CHARS = 24000
 SCHEMA_PATH = Path(__file__).with_name("translation.schema.json")
-PROVIDER_ID = "quick-ai-proxy"
-PROVIDER_TOKEN_ENV = "QUICK_AI_PROVIDER_TOKEN"
 
-_child: subprocess.Popen[str] | None = None
+
+class RequestError(Exception):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 def ask_prompt(query: str) -> str:
@@ -84,17 +100,10 @@ def prompt_for(mode: str, query: str, target: str) -> str:
     return translate_prompt(query, target)
 
 
-def resolve_codex() -> str | None:
-    candidates = [
-        os.environ.get("QUICK_AI_CODEX"),
-        shutil.which("codex"),
-        str(Path.home() / ".npm-global" / "bin" / "codex"),
-        str(Path.home() / ".local" / "bin" / "codex"),
-    ]
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+def translation_schema() -> dict[str, Any]:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema.pop("$schema", None)
+    return schema
 
 
 def resolve_wl_paste() -> str | None:
@@ -135,11 +144,7 @@ def read_clipboard_text() -> tuple[str | None, str | None]:
 
 
 def proxy_provider() -> dict[str, Any] | None:
-    """Return the custom model provider (e.g. CLIProxyAPI) from the user's Codex config.
-
-    Quick AI runs Codex with --ignore-user-config, so the provider is passed
-    back in explicitly. None means the built-in OpenAI provider (ChatGPT login).
-    """
+    """Return the custom model provider (CLIProxyAPI) from the user's Codex config."""
     codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     try:
         config = tomllib.loads((codex_home / "config.toml").read_text(encoding="utf-8"))
@@ -157,130 +162,174 @@ def provider_token(provider: dict[str, Any]) -> str | None:
     return provider.get("experimental_bearer_token")
 
 
-def provider_overrides(provider: dict[str, Any]) -> list[str]:
-    prefix = f"model_providers.{PROVIDER_ID}"
-    settings: dict[str, Any] = {
-        "name": provider.get("name", "Quick AI proxy"),
-        "base_url": provider["base_url"],
-        "wire_api": provider.get("wire_api", "responses"),
-        # The token travels through the environment, never the argument list.
-        "env_key": PROVIDER_TOKEN_ENV,
+def openrouter_base() -> str:
+    return os.environ.get("QUICK_AI_OPENROUTER_URL", OPENROUTER_URL).rstrip("/")
+
+
+def fast_request(mode: str, prompt: str, model: str, effort: str) -> dict[str, Any]:
+    """OpenRouter chat completions body for the fast path."""
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "reasoning": {"enabled": False} if effort == "off" else {"effort": effort},
+        "provider": {"sort": "latency"},
     }
-    if "supports_websockets" in provider:
-        settings["supports_websockets"] = bool(provider["supports_websockets"])
-    overrides = ["-c", f'model_provider="{PROVIDER_ID}"']
-    for key, value in settings.items():
-        overrides += ["-c", f"{prefix}.{key}={json.dumps(value)}"]
-    return overrides
-
-
-def build_command(
-    mode: str,
-    target: str,
-    workdir: str,
-    codex_path: str = "codex",
-    provider: dict[str, Any] | None = None,
-    model: str = DEFAULT_MODEL,
-    effort: str = DEFAULT_EFFORT,
-) -> list[str]:
-    del target
-    command = [
-        codex_path,
-        "exec",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--ephemeral",
-        "--skip-git-repo-check",
-        "--sandbox",
-        "read-only",
-        "--disable",
-        "fast_mode",
-        "--disable",
-        "apps",
-        "--disable",
-        "goals",
-        "--disable",
-        "hooks",
-        "--disable",
-        "memories",
-        "--disable",
-        "multi_agent",
-        "--disable",
-        "plugins",
-        "--disable",
-        "remote_plugin",
-        "--disable",
-        "shell_tool",
-        "--color",
-        "never",
-        "--model",
-        model,
-        "-c",
-        f'model_reasoning_effort="{effort}"',
-        "-C",
-        workdir,
-    ]
-    if provider is not None:
-        command += provider_overrides(provider)
     if mode == "ask":
-        command.insert(1, "--search")
+        # The model decides when to search; OpenRouter bills only actual searches.
+        body["tools"] = [
+            {
+                "type": "openrouter:web_search",
+                "parameters": {"max_results": SEARCH_MAX_RESULTS},
+            }
+        ]
     elif mode == "translate":
-        command.extend(["--output-schema", str(SCHEMA_PATH)])
-    # A lone dash tells `codex exec` to read the prompt from stdin. This keeps
-    # questions and clipboard contents out of process listings.
-    command.append("-")
-    return command
+        body["provider"]["require_parameters"] = True
+        body["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "translation",
+                "strict": True,
+                "schema": translation_schema(),
+            },
+        }
+    return body
 
 
-def friendly_error(stderr: str, return_code: int) -> tuple[str, str]:
-    lowered = stderr.lower()
-    if "not logged in" in lowered or "login" in lowered and "required" in lowered:
-        return "auth", "Codex is not signed in. Run `codex login`, then try again."
-    if (
-        "rate limit" in lowered
-        or "too many requests" in lowered
-        or "usage limit" in lowered
-    ):
-        return "rate_limit", "The model is temporarily rate-limited. Try again shortly."
-    if any(word in lowered for word in ("network", "connection", "dns", "timed out")):
-        return (
-            "network",
-            "Could not reach Codex. Check the network connection and retry.",
+def better_request(mode: str, prompt: str) -> dict[str, Any]:
+    """CLIProxyAPI Responses body for the better-answer path."""
+    body: dict[str, Any] = {
+        "model": BETTER_MODEL,
+        "input": prompt,
+        "reasoning": {"effort": BETTER_EFFORT},
+        "store": False,
+    }
+    if mode == "ask":
+        body["tools"] = [{"type": "web_search"}]
+    elif mode == "translate":
+        body["text"] = {
+            "format": {
+                "type": "json_schema",
+                "name": "translation",
+                "strict": True,
+                "schema": translation_schema(),
+            }
+        }
+    return body
+
+
+def friendly_http_error(status: int, details: str, service: str) -> RequestError:
+    lowered = details.lower()
+    if status in (401, 403):
+        return RequestError("auth", f"{service} rejected Quick AI's API key.")
+    if status == 402:
+        return RequestError("credits", f"{service} has no credits left.")
+    if status == 429:
+        return RequestError(
+            "rate_limit", "The model is temporarily rate-limited. Try again shortly."
         )
     if "reasoning" in lowered and any(
-        word in lowered for word in ("unsupported", "not supported", "invalid value")
+        word in lowered
+        for word in ("mandatory", "unsupported", "not supported", "invalid value")
     ):
-        return (
+        return RequestError(
             "effort",
             "This model does not support the chosen thinking level. "
             "Pick another in the Quick AI settings.",
         )
-    if "model" in lowered and any(
-        word in lowered for word in ("not found", "unsupported", "unavailable")
+    if status == 404 or (
+        "model" in lowered
+        and any(word in lowered for word in ("not found", "unavailable", "invalid"))
     ):
-        return "model", "The configured model is unavailable. Update Codex and retry."
-    if return_code < 0:
-        return "cancelled", "The request was cancelled."
-    return "codex", "Codex could not complete the request. Try again."
+        return RequestError(
+            "model",
+            "The configured model is unavailable. Pick another in the settings.",
+        )
+    return RequestError("http", f"{service} could not complete the request. Try again.")
 
 
-def terminate_child() -> None:
-    global _child
-    if _child is None or _child.poll() is not None:
-        return
+def post_json(
+    url: str, body: dict[str, Any], token: str, timeout: int, service: str
+) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+    )
     try:
-        os.killpg(_child.pid, signal.SIGTERM)
-        _child.wait(timeout=1.5)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
-        try:
-            os.killpg(_child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        with error:
+            details = error.read().decode("utf-8", "replace")
+        raise friendly_http_error(error.code, details, service) from None
+    except TimeoutError:
+        raise RequestError(
+            "timeout", f"No answer after {timeout} seconds. Try again."
+        ) from None
+    except urllib.error.URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            raise RequestError(
+                "timeout", f"No answer after {timeout} seconds. Try again."
+            ) from None
+        raise RequestError(
+            "network", f"Could not reach {service}. Check the network connection."
+        ) from None
+    except ValueError:
+        raise RequestError(
+            "invalid_response", f"{service} returned a malformed response."
+        ) from None
 
 
-def _signal_handler(_signum: int, _frame: Any) -> None:
-    terminate_child()
-    raise SystemExit(130)
+def chat_text(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices") or [{}]
+    content = (choices[0].get("message") or {}).get("content")
+    return content if isinstance(content, str) else ""
+
+
+def responses_text(payload: dict[str, Any]) -> str:
+    return "".join(
+        part.get("text", "")
+        for item in payload.get("output", [])
+        if item.get("type") == "message"
+        for part in item.get("content", [])
+        if part.get("type") == "output_text"
+    )
+
+
+def run_fast(mode: str, prompt: str, model: str, effort: str) -> str:
+    token = os.environ.get(OPENROUTER_KEY_ENV)
+    if not token:
+        raise RequestError(
+            "auth", f"{OPENROUTER_KEY_ENV} is not set in the DMS environment."
+        )
+    payload = post_json(
+        openrouter_base() + "/chat/completions",
+        fast_request(mode, prompt, model, effort),
+        token,
+        FAST_TIMEOUT_SECONDS,
+        "OpenRouter",
+    )
+    return chat_text(payload)
+
+
+def run_better(mode: str, prompt: str) -> str:
+    provider = proxy_provider()
+    if provider is None:
+        raise RequestError(
+            "proxy",
+            "Better answer needs the CLIProxyAPI provider in ~/.codex/config.toml.",
+        )
+    payload = post_json(
+        provider["base_url"].rstrip("/") + "/responses",
+        better_request(mode, prompt),
+        provider_token(provider) or "",
+        BETTER_TIMEOUT_SECONDS,
+        provider.get("name", "CLIProxyAPI"),
+    )
+    return responses_text(payload)
 
 
 def execute(
@@ -289,75 +338,28 @@ def execute(
     target: str,
     model: str = DEFAULT_MODEL,
     effort: str = DEFAULT_EFFORT,
+    better: bool = False,
 ) -> dict[str, Any]:
-    global _child
     started = time.monotonic()
-    timeout = {
-        "ask": ASK_TIMEOUT_SECONDS,
-        "translate": TRANSLATE_TIMEOUT_SECONDS,
-        "summarize": SUMMARY_TIMEOUT_SECONDS,
-    }[mode]
     prompt = prompt_for(mode, query, target)
+    try:
+        if better:
+            output = run_better(mode, prompt).strip()
+        else:
+            output = run_fast(mode, prompt, model, effort).strip()
+    except RequestError as error:
+        return _error(mode, error.code, error.message, started)
 
-    codex_path = resolve_codex()
-    if codex_path is None:
-        return _error(
-            mode, "missing_codex", "Codex CLI is not installed or not on PATH.", started
-        )
-
-    provider = proxy_provider()
-    environment = dict(os.environ)
-    if provider is not None:
-        environment[PROVIDER_TOKEN_ENV] = provider_token(provider) or ""
-
-    with tempfile.TemporaryDirectory(prefix="dms-quick-ai-") as workdir:
-        command = build_command(
-            mode, target, workdir, codex_path, provider, model, effort
-        )
-        try:
-            _child = subprocess.Popen(
-                command,
-                env=environment,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,
-            )
-            stdout, stderr = _child.communicate(input=prompt, timeout=timeout)
-        except FileNotFoundError:
-            return _error(
-                mode,
-                "missing_codex",
-                "Codex CLI is not installed or not on PATH.",
-                started,
-            )
-        except subprocess.TimeoutExpired:
-            terminate_child()
-            return _error(
-                mode,
-                "timeout",
-                f"No answer after {timeout} seconds. Try again.",
-                started,
-            )
-        finally:
-            process = _child
-            _child = None
-
-    if process.returncode != 0:
-        code, message = friendly_error(stderr, process.returncode)
-        return _error(mode, code, message, started)
-
-    output = stdout.strip()
     if not output:
         return _error(
-            mode, "empty", "Codex returned an empty response. Try again.", started
+            mode, "empty", "The model returned an empty response. Try again.", started
         )
 
     result: dict[str, Any] = {
         "ok": True,
         "mode": mode,
-        "model": model,
+        "model": BETTER_MODEL if better else model,
+        "better": better,
         "elapsedMs": round((time.monotonic() - started) * 1000),
     }
     if mode != "translate":
@@ -367,12 +369,7 @@ def execute(
     try:
         parsed = json.loads(output)
     except json.JSONDecodeError:
-        return _error(
-            mode,
-            "invalid_response",
-            "The translation response was malformed. Try again.",
-            started,
-        )
+        parsed = None
     if not isinstance(parsed, dict):
         return _error(
             mode,
@@ -397,17 +394,19 @@ def _error(mode: str, code: str, message: str, started: float) -> dict[str, Any]
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--check", action="store_true", help="check Codex login and model availability"
+        "--check", action="store_true", help="check that the OpenRouter key works"
     )
-    parser.add_argument(
-        "--list-models", action="store_true", help="list models Quick AI can use"
-    )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="model to answer with")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenRouter model")
     parser.add_argument(
         "--effort",
         choices=("", *EFFORTS),
         default=DEFAULT_EFFORT,
-        help="reasoning effort (thinking level)",
+        help="thinking level for the fast model",
+    )
+    parser.add_argument(
+        "--better",
+        action="store_true",
+        help=f"answer with {BETTER_MODEL} at {BETTER_EFFORT} thinking instead",
     )
     parser.add_argument("--mode", choices=("ask", "translate", "summarize"))
     parser.add_argument("--target", choices=("auto", "en", "de"), default="auto")
@@ -418,12 +417,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="summarize the current plain-text Wayland clipboard",
     )
     args = parser.parse_args(argv)
-    # An empty --model (no setting saved yet) means the default.
+    # Empty values (no setting saved yet) mean the defaults.
     args.model = args.model or DEFAULT_MODEL
     args.effort = args.effort or DEFAULT_EFFORT
     if not MODEL_PATTERN.match(args.model):
         parser.error("invalid --model")
-    if args.check or args.list_models:
+    if args.check:
         return args
     if not args.mode:
         parser.error("--mode is required unless --check is used")
@@ -446,101 +445,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def proxy_models(provider: dict[str, Any]) -> tuple[list[str], str | None]:
-    """Return the proxy's text models, or an error message."""
-    request = urllib.request.Request(provider["base_url"].rstrip("/") + "/models")
-    token = provider_token(provider)
-    if token:
-        request.add_header("Authorization", f"Bearer {token}")
-    name = provider.get("name", "the model proxy")
+def check_installation() -> dict[str, Any]:
+    token = os.environ.get(OPENROUTER_KEY_ENV)
+    if not token:
+        return {
+            "ok": False,
+            "message": f"{OPENROUTER_KEY_ENV} is not set in the DMS environment.",
+        }
+    request = urllib.request.Request(
+        openrouter_base() + "/key", headers={"Authorization": f"Bearer {token}"}
+    )
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            payload = json.load(response)
+        with urllib.request.urlopen(request, timeout=8):
+            pass
     except urllib.error.HTTPError as error:
-        return [], f"{name} rejected Quick AI (HTTP {error.code})."
+        error.close()
+        return {
+            "ok": False,
+            "message": f"OpenRouter rejected {OPENROUTER_KEY_ENV} (HTTP {error.code}).",
+        }
     except (OSError, ValueError):
-        return [], f"Could not reach {name}."
-    models = {
-        entry.get("id")
-        for entry in payload.get("data", [])
-        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
-    }
-    return sorted(m for m in models if not UNUSABLE_MODEL_PATTERN.search(m)), None
-
-
-def list_models() -> dict[str, Any]:
-    provider = proxy_provider()
-    if provider is None:
-        # Codex's built-in provider: offer the default only.
-        return {"ok": True, "models": [DEFAULT_MODEL], "default": DEFAULT_MODEL}
-    models, error = proxy_models(provider)
-    if error:
-        return {"ok": False, "message": error, "default": DEFAULT_MODEL}
-    return {"ok": True, "models": models, "default": DEFAULT_MODEL}
-
-
-def check_proxy(provider: dict[str, Any], model: str) -> dict[str, Any]:
-    models, error = proxy_models(provider)
-    if error:
-        return {"ok": False, "message": error}
-    if model not in models:
-        name = provider.get("name", "the model proxy")
-        return {
-            "ok": False,
-            "message": f"{name} does not serve {model}. Pick another model in the Quick AI settings.",
-        }
-    return {"ok": True}
-
-
-def check_installation(model: str = DEFAULT_MODEL) -> dict[str, Any]:
-    codex_path = resolve_codex()
-    if codex_path is None:
-        return {"ok": False, "message": "Codex CLI is not installed."}
-    provider = proxy_provider()
-    if provider is not None:
-        return check_proxy(provider, model)
-    try:
-        login = subprocess.run(
-            [codex_path, "login", "status"],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            check=False,
-        )
-        login_output = login.stdout + login.stderr
-        if login.returncode != 0 or "logged in" not in login_output.lower():
-            return {
-                "ok": False,
-                "message": "Codex is not signed in. Run `codex login`.",
-            }
-        models = subprocess.run(
-            [codex_path, "debug", "models"],
-            capture_output=True,
-            text=True,
-            timeout=12,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return {"ok": False, "message": "Could not inspect the Codex installation."}
-    output = models.stdout + models.stderr
-    if models.returncode != 0 or model not in output:
-        return {
-            "ok": False,
-            "message": "The configured Quick AI model is unavailable. Update Codex and retry.",
-        }
+        return {"ok": False, "message": "Could not reach OpenRouter."}
     return {"ok": True}
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.check:
-        print(json.dumps(check_installation(args.model)))
+        print(json.dumps(check_installation()))
         return 0
-    if args.list_models:
-        print(json.dumps(list_models()))
-        return 0
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(signum, _signal_handler)
     if args.clipboard:
         clipboard_text, clipboard_error = read_clipboard_text()
         if clipboard_error:
@@ -560,7 +493,14 @@ def main(argv: list[str] | None = None) -> int:
         args.query = clipboard_text
     print(
         json.dumps(
-            execute(args.mode, args.query, args.target, args.model, args.effort),
+            execute(
+                args.mode,
+                args.query,
+                args.target,
+                args.model,
+                args.effort,
+                args.better,
+            ),
             ensure_ascii=False,
         )
     )
