@@ -321,6 +321,19 @@ class LaunchTests(unittest.TestCase):
         self.assertIn("--volume=100", mpv_args)
         self.assertIn(f"--input-ipc-server={overlay[3]}", mpv_args)
 
+    def test_watch_runs_chat_overlay_through_uv_when_present(self) -> None:
+        bin_dir = self.fake_tools("printf video", "cat > /dev/null")
+        uv = bin_dir / "uv"
+        uv.write_text("#!/bin/sh\n")
+        uv.chmod(0o755)
+        with patch.object(
+            twitch_follows.subprocess, "Popen", wraps=subprocess.Popen
+        ) as popen:
+            twitch_follows.main(["--watch", "big", "--no-chat-overlay"])
+        overlay = popen.call_args_list[0].args[0]
+        self.assertEqual(overlay[:3], [str(uv), "run", "--script"])
+        self.assertTrue(overlay[3].endswith("chat_overlay.py"))
+
     def test_chat_setting_off_still_starts_relay_hidden_for_jump_to_live(self) -> None:
         self.fake_tools("printf video", "cat > /dev/null")
         with patch.object(

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# /// script
+# dependencies = ["pillow"]
+# ///
 """Draw a channel's Twitch chat on top of an mpv window.
 
 Reads chat anonymously over Twitch IRC and renders the latest messages
