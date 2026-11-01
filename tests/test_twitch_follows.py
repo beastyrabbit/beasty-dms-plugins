@@ -579,9 +579,11 @@ print(json.dumps(clients))
         self.assertLess(time.monotonic() - started, 4)
         launch, remove = (bin_dir / "chat.args").read_text().splitlines()
         self.assertRegex(
-            launch, r"^--slim --instance twitchfollows-[0-9a-f]{8} -c t:big$"
+            launch,
+            r"^--slim --save-settings --instance twitchfollows-[0-9a-f]{8} -c t:big$",
         )
-        self.assertEqual(remove, launch.split(" -c")[0][7:] + " --remove t:big")
+        instance = launch.split(" -c")[0].split(" ", 2)[2]
+        self.assertEqual(remove, instance + " --remove t:big")
         lua = (bin_dir / "repl").read_text().split("\n----\n")[0]
         self.assertIn(' }, "0xa1"\n', lua)  # focus
         self.assertIn("weave.create", lua)
@@ -636,7 +638,7 @@ print(json.dumps(clients))
         self.assertEqual(
             (bin_dir / "chat.args").read_text().splitlines(),
             [
-                "--slim --instance twitchfollows-0123abcd -c t:big",
+                "--slim --save-settings --instance twitchfollows-0123abcd -c t:big",
                 "--instance twitchfollows-0123abcd --remove t:big",
             ],
         )

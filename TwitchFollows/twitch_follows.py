@@ -546,8 +546,11 @@ def join_group(
         if command:
             # -c opens only this channel without saving the layout. With
             # --instance, a running instance takes the channel as a tab and
-            # this process exits right away.
-            slim = ["--slim", *chat_instance(group)] if shared else []
+            # this process exits right away. --save-settings keeps settings
+            # changed in the chat window, which -c alone would drop.
+            slim = (
+                ["--slim", "--save-settings", *chat_instance(group)] if shared else []
+            )
             chat = subprocess.Popen(
                 [*command, *slim, "-c", f"t:{login}"],
                 stdin=subprocess.DEVNULL,
