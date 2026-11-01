@@ -22,8 +22,8 @@ PluginSettings {
             } catch (error) {
                 return;
             }
-            if (!raidStatus.running && Date.now() - loginStartedAt > 5000)
-                polling = false;
+            // Also picks up a login started before these settings opened.
+            polling = raidStatus.running || Date.now() - loginStartedAt <= 5000;
         }, 0, 10000, root);
     }
 
