@@ -116,8 +116,12 @@ PluginSettings {
 
     DButton {
         text: "Log in to Twitch"
-        enabled: clientIdSetting.value !== ""
         // A notification shows the code; Twitch's page to confirm it opens in the browser.
-        onClicked: Quickshell.execDetached(["systemd-run", "--user", "--scope", "--quiet", "--collect", "python3", Paths.strip(Qt.resolvedUrl("twitch_follows.py")), "--raid-login", clientIdSetting.value])
+        // The field saves only on Enter or focus loss, so a pasted ID is saved here first;
+        // an empty or malformed one gets a notification from the script.
+        onClicked: {
+            clientIdSetting.commit();
+            Quickshell.execDetached(["systemd-run", "--user", "--scope", "--quiet", "--collect", "python3", Paths.strip(Qt.resolvedUrl("twitch_follows.py")), "--raid-login", clientIdSetting.value.trim()]);
+        }
     }
 }

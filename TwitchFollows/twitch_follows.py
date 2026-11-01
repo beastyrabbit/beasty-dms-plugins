@@ -158,6 +158,18 @@ QUALITY_FALLBACKS = {
 }
 
 
+def raid_selection(quality: str, audio_only: bool) -> tuple[str, list[str]]:
+    """What streamlink asks for when a raid starts the next channel, and the
+    renditions video may use: the setting's ceiling stays, whether the
+    headphones button is on or was switched off since the stream started."""
+    if quality == "audio_only":
+        preferred = QUALITY_FALLBACKS["audio_only"] if audio_only else "best"
+    else:
+        preferred = QUALITY_FALLBACKS.get(quality, f"{quality},best")
+    selection = QUALITY_FALLBACKS["audio_only"] if audio_only else preferred
+    return selection, preferred.split(",")
+
+
 class TwitchError(Exception):
     pass
 
@@ -1033,11 +1045,7 @@ class Playback:
         fifo.unlink(missing_ok=True)
         os.mkfifo(fifo, 0o600)
         audio_only = old.switcher.policy.audio_only
-        selection = (
-            QUALITY_FALLBACKS["audio_only"]
-            if audio_only
-            else QUALITY_FALLBACKS.get(self.quality, f"{self.quality},best")
-        )
+        selection, preferred = raid_selection(self.quality, audio_only)
         source = stream_quality.Source.start(
             self.streamlink,
             target,
@@ -1073,9 +1081,7 @@ class Playback:
             old.relay.current.stop()
             if old.fifo:
                 old.fifo.unlink(missing_ok=True)
-            policy = stream_quality.QualityPolicy(
-                selection.split(","), audio_only=audio_only
-            )
+            policy = stream_quality.QualityPolicy(preferred, audio_only=audio_only)
             policy.max_quality = old.switcher.policy.max_quality
             switcher = stream_quality.Switcher(
                 self.streamlink, target, self.ipc_path, policy, relay

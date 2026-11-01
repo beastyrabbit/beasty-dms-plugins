@@ -411,6 +411,29 @@ class FollowTests(TempDirs):
             ],
         )
 
+    def test_the_raided_channel_keeps_the_quality_setting_and_the_audio_mode(
+        self,
+    ) -> None:
+        import stream_quality
+
+        available = ["audio_only", "160p", "480p", "720p60", "1080p60", "best"]
+
+        def follow(quality: str, audio_only: bool) -> tuple[str, str]:
+            selection, preferred = twitch_follows.raid_selection(quality, audio_only)
+            policy = stream_quality.QualityPolicy(preferred, audio_only=audio_only)
+            policy.learn(available, 0.0)
+            playing = policy.current
+            policy.set_audio(False)
+            return selection, f"{playing}->{policy.target()}"
+
+        # Audio only, then video back on: still capped at the setting.
+        self.assertEqual(follow("480p", True), ("audio_only,worst", "audio_only->480p"))
+        # The audio-only setting with video switched on starts with video.
+        self.assertEqual(follow("audio_only", False), ("best", "1080p60->1080p60"))
+        self.assertEqual(
+            follow("audio_only", True), ("audio_only,worst", "audio_only->1080p60")
+        )
+
     def test_flatpak_chat_does_not_follow_raids(self) -> None:
         raid_login.write_token(TOKEN)
         with (
