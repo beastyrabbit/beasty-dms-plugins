@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import qs.Common
 import qs.DCommon.Widgets
 import qs.Modules.Plugins
@@ -95,5 +96,32 @@ PluginSettings {
         label: "Start with chat in the player"
         description: "Open new streams with their chat drawn in mpv and the Chatterino window hidden. The chat button in mpv (or C) switches a whole group between the two."
         defaultValue: false
+    }
+
+    ToggleSetting {
+        settingKey: "followRaids"
+        label: "Follow raids"
+        description: "When a channel you watch raids another, the raided channel takes over its window and chat tab. Needs the Twitch login below and uv."
+        defaultValue: true
+    }
+
+    StringSetting {
+        id: clientIdSetting
+
+        settingKey: "raidClientId"
+        label: "Twitch app client ID"
+        description: "Following raids needs a Twitch app of its own: register one at dev.twitch.tv/console as a public client (any name, redirect URL http://localhost) and paste its client ID here."
+        placeholder: "Client ID"
+    }
+
+    DButton {
+        text: "Log in to Twitch"
+        // A notification shows the code; Twitch's page to confirm it opens in the browser.
+        // The field saves only on Enter or focus loss, so a pasted ID is saved here first;
+        // an empty or malformed one gets a notification from the script.
+        onClicked: {
+            clientIdSetting.commit();
+            Quickshell.execDetached(["systemd-run", "--user", "--scope", "--quiet", "--collect", "python3", Paths.strip(Qt.resolvedUrl("twitch_follows.py")), "--raid-login", clientIdSetting.value.trim()]);
+        }
     }
 }

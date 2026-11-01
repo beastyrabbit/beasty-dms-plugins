@@ -2,7 +2,8 @@
 """Twitch follows helper for the Twitch Follows DMS plugin.
 
 Reads the account Chatterino is logged in with, so no separate Twitch app or
-token is needed. The token only ever leaves this process as a Helix header.
+token is needed for the list. The token only ever leaves this process as a
+Helix header. Following raids uses a login of its own (raid_login.py).
 """
 
 from __future__ import annotations
@@ -29,9 +30,11 @@ import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
+import raid_login
 import stream_quality
 
 HELIX_URL = "https://api.twitch.tv/helix"
@@ -119,6 +122,15 @@ set_locked(true)
 hl.dispatch(hl.dsp.focus({ window = sel(focus) }))
 return "ok"
 """
+# Raids, by the raiding channel, as raid_watch.py writes them; kept this long.
+RAIDS_FILE = "twitch-follows-raids.json"
+RAIDS_LOCK = "twitch-follows-raids.lock"
+RAID_TTL_SECONDS = 120
+# How long a stream that ended waits on its last picture for its raid.
+RAID_GRACE_SECONDS = 20
+# How often a stream that follows raids makes sure a watcher runs.
+WATCHER_CHECK_SECONDS = 30
+IPC_REQUEST_ID = 9
 DEFAULT_VOLUME = 30
 REWIND_BUFFER = "2300MiB"
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,25}$")
@@ -144,6 +156,18 @@ QUALITY_FALLBACKS = {
     "480p": ceiling("480p"),
     "audio_only": "audio_only,worst",
 }
+
+
+def raid_selection(quality: str, audio_only: bool) -> tuple[str, list[str]]:
+    """What streamlink asks for when a raid starts the next channel, and the
+    renditions video may use: the setting's ceiling stays, whether the
+    headphones button is on or was switched off since the stream started."""
+    if quality == "audio_only":
+        preferred = QUALITY_FALLBACKS["audio_only"] if audio_only else "best"
+    else:
+        preferred = QUALITY_FALLBACKS.get(quality, f"{quality},best")
+    selection = QUALITY_FALLBACKS["audio_only"] if audio_only else preferred
+    return selection, preferred.split(",")
 
 
 class TwitchError(Exception):
@@ -378,6 +402,18 @@ def runtime_path(name: str) -> Path:
     return Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()) / name
 
 
+def try_lock(name: str) -> IO | None:
+    """An flock on a runtime file, held until the returned file is closed;
+    None if someone else holds it."""
+    handle = open(runtime_path(name), "a")  # noqa: SIM115 - the open file is the lock
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
 @contextlib.contextmanager
 def file_lock(name: str, blocking: bool) -> Iterator[bool]:
     """Hold an flock on a runtime file; yield False if non-blocking and busy."""
@@ -502,7 +538,11 @@ def arrange(hyprctl: str, group: dict[str, Any], focus: str = "") -> None:
 
 
 def join_group(
-    login: str, viewer: subprocess.Popen, group_id: str, chat_in_mpv: bool
+    login: str,
+    viewer: subprocess.Popen,
+    group_id: str,
+    chat_in_mpv: bool,
+    follow_raids: bool = False,
 ) -> tuple[dict[str, Any], subprocess.Popen | None]:
     """Adds the stream to a viewing group and opens its chat there.
 
@@ -539,6 +579,9 @@ def join_group(
             }
             groups.append(group)
         stream = {"login": login, "pid": os.getpid(), "window": ""}
+        if follow_raids:
+            # raid_watch.py watches the channels of streams marked so.
+            stream["followRaids"] = True
         group["streams"].append(stream)
         save_groups(groups)
         before = chatterino_windows(hypr_clients(hyprctl)) if hyprctl else set()
@@ -764,6 +807,10 @@ def leave_group(
             chat.wait()
 
 
+def watch_lock(login: str) -> str:
+    return f"twitch-follows-watch-{login}.lock"
+
+
 def watch(
     login: str,
     quality: str,
@@ -772,6 +819,7 @@ def watch(
     media_title: str = "",
     group_id: str = "",
     muted: bool = False,
+    follow_raids: bool = False,
 ) -> int:
     streamlink = shutil.which("streamlink")
     mpv = shutil.which("mpv")
@@ -781,44 +829,362 @@ def watch(
             f"{missing} is not installed", f"Install it with: sudo pacman -S {missing}"
         )
         return 1
-    with file_lock(f"twitch-follows-watch-{login}.lock", blocking=False) as acquired:
-        if not acquired:
-            return 0
-        return play(
-            streamlink,
-            mpv,
-            login,
-            quality,
-            chat_in_mpv,
-            volume,
-            media_title or login,
-            group_id,
-            muted,
+    # play() owns the lock from here: following a raid swaps it for the
+    # raided channel's.
+    lock = try_lock(watch_lock(login))
+    if lock is None:
+        return 0
+    return play(
+        streamlink,
+        mpv,
+        login,
+        quality,
+        chat_in_mpv,
+        volume,
+        media_title or login,
+        group_id,
+        muted,
+        lock,
+        follow_raids,
+    )
+
+
+def read_raids() -> dict[str, dict[str, Any]]:
+    """Recent raids by the raiding channel's login, as raid_watch.py wrote them."""
+    try:
+        raids = json.loads(runtime_path(RAIDS_FILE).read_text())
+    except (OSError, ValueError):
+        return {}
+    return raids if isinstance(raids, dict) else {}
+
+
+def raids_followable() -> bool:
+    """Following raids needs the watcher (run through uv for its WebSocket
+    library), the plugin's own Twitch login, and a chat that can change
+    channel: a shared chatterino-slim window or chat in mpv only. The Flatpak's
+    one window per stream can't."""
+    command = chatterino_command()
+    flatpak = bool(command) and Path(command[0]).name == "flatpak"
+    return bool(shutil.which("uv")) and raid_login.has_token() and not flatpak
+
+
+class FollowError(Exception):
+    pass
+
+
+@dataclass
+class Channel:
+    """What the window plays now: a channel, its watch lock, and the relay and
+    quality switcher feeding mpv from its streamlink."""
+
+    login: str
+    lock: IO
+    relay: stream_quality.Relay
+    switcher: stream_quality.Switcher
+    # Wall clock, to tell its raids from older ones.
+    started: float
+    # Where mpv reads it from, once a raid brought it (the first plays on stdin).
+    fifo: Path | None = None
+
+
+class Playback:
+    """One mpv window. It plays the channel it was opened for and, when that
+    channel raids another, takes the window, its place in the group, volume,
+    mute and quality choices over to the raided channel."""
+
+    def __init__(
+        self,
+        streamlink: str,
+        quality: str,
+        ipc_path: Path,
+        follow: bool,
+        chat_always_in_mpv: bool,
+    ) -> None:
+        self.streamlink = streamlink
+        self.quality = quality
+        self.ipc_path = ipc_path
+        self.viewer: subprocess.Popen | None = None
+        self.follow = follow
+        self.chat_always_in_mpv = chat_always_in_mpv
+        self.hold_seconds = RAID_GRACE_SECONDS if follow else 0
+        self.channel: Channel | None = None
+        self.overlay: subprocess.Popen | None = None
+        self.joined: tuple[dict[str, Any], subprocess.Popen | None] | None = None
+        self.handled: set[str] = set()
+        # Set when the channel raided where this window can't follow: no
+        # other raid will come, so its end needs no wait.
+        self.raided_away = False
+        # Set when a follow failed after mpv had left the old channel, which
+        # closes the window; that was already reported.
+        self.gave_up = False
+        self.fifos = 0
+        self.watcher: subprocess.Popen | None = None
+        self.watcher_checked = -math.inf
+
+    def start_overlay(self, login: str, hidden: bool, loading: bool = True) -> None:
+        # uv provides the Pillow the overlay declares inline, so emotes show
+        # even where the system Python lacks it; plain Python falls back to
+        # text chat.
+        uv = shutil.which("uv")
+        self.overlay = subprocess.Popen(
+            [
+                *([uv, "run", "--script"] if uv else [sys.executable]),
+                str(Path(__file__).with_name("chat_overlay.py")),
+                login,
+                str(self.ipc_path),
+                *([] if not hidden else ["--hidden"]),
+                *([] if loading else ["--no-loading"]),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
 
+    def stop_overlay(self) -> None:
+        if self.overlay:
+            self.overlay.terminate()
+            try:
+                self.overlay.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.overlay.kill()
+                self.overlay.wait()
 
-def wait_while_playing(
-    viewer: subprocess.Popen,
-    relay: stream_quality.Relay,
-    switcher: stream_quality.Switcher,
-    chat_sync: ChatSync,
-    group: dict[str, Any],
-    chat: subprocess.Popen | None,
-) -> bool:
-    """Waits until mpv exits or the stream ends, switching quality and keeping
-    the chat in step with the group meanwhile. The group's streams close with
-    its chat window: returns True when that closed mpv."""
-    while viewer.poll() is None and not relay.finished.is_set():
-        if chat:
-            chat.poll()  # reaps it, so a closed chat isn't a zombie
-        current = next((g for g in load_groups() if g["id"] == group["id"]), None)
-        if chat_closed(current):
-            viewer.terminate()
-            viewer.wait()
-            return True
-        chat_sync.step(current)
-        switcher.step(0.2)
-    return False
+    def wait(self, chat_sync: ChatSync) -> bool:
+        """Waits until mpv exits or the stream ends, switching quality,
+        following raids and keeping the chat in step with the group meanwhile.
+        The group's streams close with its chat window: returns True when that
+        closed mpv."""
+        group, chat = self.joined
+        while self.viewer.poll() is None and not self.channel.relay.finished.is_set():
+            if chat:
+                chat.poll()  # reaps it, so a closed chat isn't a zombie
+            current = next((g for g in load_groups() if g["id"] == group["id"]), None)
+            if chat_closed(current):
+                self.viewer.terminate()
+                self.viewer.wait()
+                return True
+            chat_sync.step(current)
+            self.check_raids(current)
+            if self.channel.relay.source_ended:
+                # Ended: mpv waits for a raid on the last picture, nothing to
+                # switch.
+                if self.raided_away:
+                    self.channel.relay.stop()
+                time.sleep(0.2)
+            else:
+                self.channel.switcher.step(0.2)
+        return False
+
+    def check_raids(self, group: dict[str, Any] | None) -> None:
+        if not self.follow:
+            return
+        self.ensure_watcher()
+        raid = self.new_raid()
+        if raid:
+            self.follow_raid(raid, group)
+
+    def close(self, log_path: Path, lock: IO) -> None:
+        """Ends what play() and raids started: the switcher, the stream's place
+        in its group (its chat tab closes with it, and the chat window with
+        the group's last stream), the chat overlay and the channel lock."""
+        channel = self.channel
+        if channel:
+            channel.switcher.close()
+            if channel.switcher.source.log_path != log_path:
+                channel.switcher.source.log_path.unlink(missing_ok=True)
+            if channel.fifo:
+                channel.fifo.unlink(missing_ok=True)
+        if self.joined:
+            leave_group(channel.login, *self.joined)
+        self.stop_overlay()
+        (channel.lock if channel else lock).close()
+
+    def ensure_watcher(self) -> None:
+        """Starts raid_watch.py unless one runs; checked again now and then,
+        as an idle watcher may have just exited."""
+        now = time.monotonic()
+        if now - self.watcher_checked < WATCHER_CHECK_SECONDS:
+            return
+        self.watcher_checked = now
+        if self.watcher and self.watcher.poll() is None:
+            return
+        probe = try_lock(RAIDS_LOCK)
+        if probe is None:
+            return  # another stream's watcher runs
+        probe.close()
+        uv = shutil.which("uv")
+        if not uv:
+            return
+        self.watcher = subprocess.Popen(
+            [uv, "run", "--script", str(Path(__file__).with_name("raid_watch.py"))],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            # Not stopped with this stream: other streams may still need it.
+            start_new_session=True,
+        )
+
+    def new_raid(self) -> dict[str, Any] | None:
+        raid = read_raids().get(self.channel.login)
+        if (
+            not isinstance(raid, dict)
+            or raid.get("id") in self.handled
+            or raid.get("at", 0) < self.channel.started
+        ):
+            return None
+        self.handled.add(raid.get("id"))
+        if not LOGIN_PATTERN.match(str(raid.get("to", ""))):
+            return None
+        return raid
+
+    def follow_raid(self, raid: dict[str, Any], group: dict[str, Any] | None) -> None:
+        target = raid["to"].lower()
+        lock = try_lock(watch_lock(target))
+        if lock is None:
+            # The raided channel plays already: this one ends as before.
+            self.raided_away = True
+            return
+        try:
+            self.switch_to(target, str(raid.get("name") or target), lock, group)
+        except FollowError as error:
+            lock.close()
+            notify(f"Could not follow the raid to {target}", str(error))
+            self.raided_away = True
+
+    def switch_to(
+        self, target: str, name: str, lock: IO, group: dict[str, Any] | None
+    ) -> None:
+        """Plays the raided channel in this window: mpv loads it from a new
+        FIFO (another channel can't be spliced into the running stream), then
+        the old channel's relay, switcher, overlay and chat tab go."""
+        from chat_overlay import IMAGE_OVERLAY_ID
+
+        old = self.channel
+        self.fifos += 1
+        fifo = runtime_path(f"twitch-follows-{os.getpid()}-{self.fifos}.ts")
+        fifo.unlink(missing_ok=True)
+        os.mkfifo(fifo, 0o600)
+        audio_only = old.switcher.policy.audio_only
+        selection, preferred = raid_selection(self.quality, audio_only)
+        source = stream_quality.Source.start(
+            self.streamlink,
+            target,
+            selection,
+            runtime_path(f"twitch-follows-{target}.log"),
+        )
+        try:
+            mpv = connect_ipc(self.ipc_path)
+        except OSError:
+            source.stop()
+            fifo.unlink(missing_ok=True)
+            raise FollowError("mpv is not reachable.") from None
+        with contextlib.closing(mpv.sock):
+            reply = ipc_request(mpv, ["loadfile", str(fifo), "replace"])
+            if reply.get("error") != "success":
+                source.stop()
+                fifo.unlink(missing_ok=True)
+                raise FollowError("mpv did not load the stream.")
+            # From here mpv no longer plays the old channel.
+            output = open_fifo(fifo, self.viewer)
+            if output is None:
+                source.stop()
+                fifo.unlink(missing_ok=True)
+                self.gave_up = True
+                self.viewer.terminate()
+                raise FollowError("mpv did not open the stream.")
+            relay = stream_quality.Relay(output, source, self.hold_seconds)
+            relay.start()
+            # The old channel's still (shown under audio only) and its chat.
+            mpv.send(["overlay-remove", stream_quality.FRAME_OVERLAY_ID])
+            old.switcher.close()
+            old.relay.stop()
+            old.relay.current.stop()
+            if old.fifo:
+                old.fifo.unlink(missing_ok=True)
+            policy = stream_quality.QualityPolicy(preferred, audio_only=audio_only)
+            policy.max_quality = old.switcher.policy.max_quality
+            switcher = stream_quality.Switcher(
+                self.streamlink, target, self.ipc_path, policy, relay
+            )
+            self.channel = Channel(target, lock, relay, switcher, time.time(), fifo)
+            self.stop_overlay()
+            mpv.send(["overlay-remove", IMAGE_OVERLAY_ID])
+            # The group's chat mode, which the chat button keeps up to date;
+            # without Chatterino, that is whether the chat is shown at all.
+            in_mpv = bool(group.get("chatInMpv")) if group else self.chat_always_in_mpv
+            self.start_overlay(target, hidden=not in_mpv, loading=False)
+            # Video back on in case audio only had turned it off; an audio-only
+            # stream simply has none.
+            mpv.send(["set_property", "vid", "auto"])
+            mpv.send(["set_property", "force-media-title", name])
+            mpv.send(["show-text", f"Following the raid to {name}", 4000])
+        self.rename(old.login, target)
+        old.lock.close()
+
+    def rename(self, old: str, target: str) -> None:
+        """The stream keeps its place in the group under the new channel, and
+        the group's chat swaps the old channel's tab for the new one."""
+        group, _ = self.joined
+        command = chatterino_command()
+        with file_lock(GROUPS_LOCK, blocking=True):
+            groups = load_groups()
+            current = next((g for g in groups if g["id"] == group["id"]), None)
+            if current:
+                for stream in current["streams"]:
+                    if stream["pid"] == os.getpid():
+                        stream["login"] = target
+                save_groups(groups)
+            if group["shared"] and command:
+                # One message: the instance removes, then adds, so its window
+                # never runs out of tabs and closes.
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    subprocess.run(
+                        [
+                            *command,
+                            *chat_instance(group),
+                            "--remove",
+                            f"t:{old}",
+                            "-c",
+                            f"t:{target}",
+                        ],
+                        capture_output=True,
+                        check=False,
+                        timeout=10,
+                    )
+
+
+def connect_ipc(path: Path):
+    # Imported here: chat_overlay pulls in Pillow, which listing channels
+    # doesn't need.
+    from chat_overlay import Mpv
+
+    return Mpv(str(path))
+
+
+def ipc_request(mpv, command: list, timeout: float = 5) -> dict[str, Any]:
+    """Sends a command and waits for mpv's reply to it."""
+    mpv.send(command, IPC_REQUEST_ID)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for event in mpv.events(0.2):
+            if event.get("request_id") == IPC_REQUEST_ID and "error" in event:
+                return event
+    return {}
+
+
+def open_fifo(path: Path, viewer: subprocess.Popen, timeout: float = 10):
+    """Opens the FIFO mpv has been told to load, once mpv has it open."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and viewer.poll() is None:
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as error:
+            if error.errno != errno.ENXIO:  # ENXIO: no reader yet
+                return None
+            time.sleep(0.05)
+            continue
+        return open(fd, "wb", buffering=0)
+    return None
 
 
 def play(
@@ -831,6 +1197,8 @@ def play(
     media_title: str,
     group_id: str,
     muted: bool,
+    lock: IO,
+    follow_raids: bool = False,
 ) -> int:
     # mpv starts right away and the relay feeds it what streamlink writes, so
     # the window (with chat and a loading message) appears while streamlink is
@@ -850,30 +1218,18 @@ def play(
     ]
     # Without a Chatterino, mpv is the only place for chat. The chat relay
     # always runs, because it also handles `End` (jump to live).
-    chat_in_mpv = chat_in_mpv or chatterino_command() is None
+    chat_always_in_mpv = chatterino_command() is None
+    chat_in_mpv = chat_in_mpv or chat_always_in_mpv
     ipc_path = runtime_path(f"twitch-follows-{login}-{os.getpid()}.sock")
     player.append(f"--input-ipc-server={ipc_path}")
-    # uv provides the Pillow the overlay declares inline, so emotes show even
-    # where the system Python lacks it; plain Python falls back to text chat.
-    uv = shutil.which("uv")
-    overlay = subprocess.Popen(
-        [
-            *([uv, "run", "--script"] if uv else [sys.executable]),
-            str(Path(__file__).with_name("chat_overlay.py")),
-            login,
-            str(ipc_path),
-            *([] if chat_in_mpv else ["--hidden"]),
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    follow = follow_raids and raids_followable()
+    playback = Playback(streamlink, quality, ipc_path, follow, chat_always_in_mpv)
     log_path = runtime_path(f"twitch-follows-{login}.log")
     selection = QUALITY_FALLBACKS.get(quality, f"{quality},best")
-    joined = None
-    switcher = None
     chat_sync = None
+    stream_failed = False
     try:
+        playback.start_overlay(login, hidden=not chat_in_mpv)
         first = stream_quality.Source.start(streamlink, login, selection, log_path)
         viewer = subprocess.Popen(
             [*player, "-"],
@@ -881,22 +1237,26 @@ def play(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        relay = stream_quality.Relay(viewer.stdin, first)
+        playback.viewer = viewer
+        relay = stream_quality.Relay(viewer.stdin, first, playback.hold_seconds)
         relay.start()
         policy = stream_quality.QualityPolicy(
             selection.split(","), audio_only=quality == "audio_only"
         )
         switcher = stream_quality.Switcher(streamlink, login, ipc_path, policy, relay)
-        joined = join_group(login, viewer, group_id, chat_in_mpv)
-        chat_sync = ChatSync(ipc_path, joined[0]["id"], chat_in_mpv)
+        playback.channel = Channel(login, lock, relay, switcher, time.time())
+        playback.joined = join_group(login, viewer, group_id, chat_in_mpv, follow)
+        chat_sync = ChatSync(ipc_path, playback.joined[0]["id"], chat_in_mpv)
         # Whichever ends first decides: mpv closed by the user is normal, the
         # stream ending first means it failed or ended. After a quality
-        # switch, that is the streamlink switched to.
-        closed_with_chat = wait_while_playing(
-            viewer, relay, switcher, chat_sync, *joined
-        )
+        # switch, that is the streamlink switched to; after a raid, the raided
+        # channel's.
+        closed_with_chat = playback.wait(chat_sync) or playback.gave_up
+        relay = playback.channel.relay
         source = relay.current.process
         source_ended_first = relay.source_ended
+        # Ends a hold for a raid that won't come now.
+        relay.stop(timeout=0)
         if source_ended_first:
             viewer.wait()  # the relay closed its input
         elif source.poll() is None:
@@ -917,19 +1277,13 @@ def play(
     finally:
         if chat_sync:
             chat_sync.close()
-        if switcher:
-            switcher.close()
-            if switcher.source.log_path != log_path:
-                switcher.source.log_path.unlink(missing_ok=True)
-        # The stream's chat tab closes with it, and the chat window with the
-        # group's last stream.
-        if joined:
-            leave_group(login, *joined)
-        overlay.terminate()
-        overlay.wait()
+        playback.close(log_path, lock)
         ipc_path.unlink(missing_ok=True)
     if stream_failed:
-        notify(f"Could not play {login}", lines[-1] if lines else "streamlink failed.")
+        notify(
+            f"Could not play {playback.channel.login}",
+            lines[-1] if lines else "streamlink failed.",
+        )
         return source.returncode
     return 0
 
@@ -944,6 +1298,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--watch",
         metavar="LOGIN",
         help="play a channel in mpv, grouped with its chat in Chatterino",
+    )
+    group.add_argument(
+        "--raid-login",
+        metavar="CLIENT_ID",
+        help="log in with the plugin's own Twitch app, for following raids",
     )
     parser.add_argument(
         "--quality", default="best", help="streamlink quality for --watch"
@@ -973,7 +1332,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="start the --watch player muted, keeping --volume for unmuting",
     )
+    parser.add_argument(
+        "--follow-raids",
+        action="store_true",
+        help="when the --watch channel raids another, play that one instead",
+    )
     return parser.parse_args(argv)
+
+
+def raid_login_command(client_id: str) -> int:
+    """Logs in for following raids: a notification shows the code, and the
+    browser opens Twitch's page to confirm it."""
+    if not raid_login.CLIENT_ID_PATTERN.match(client_id):
+        notify("Raid following", "That is not a Twitch client ID.")
+        return 2
+
+    def show_code(code: str, url: str) -> None:
+        notify("Log in to follow raids", f"Confirm the code {code} on Twitch.")
+        opener = shutil.which("xdg-open")
+        if opener:
+            subprocess.Popen(
+                [opener, url],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+
+    try:
+        token = raid_login.device_login(client_id, show_code)
+    except (raid_login.LoginError, raid_login.TransientError) as error:
+        notify("Could not log in to follow raids", str(error))
+        return 1
+    notify("Raid following is on", f"Logged in as {token.get('login') or 'you'}.")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -985,6 +1377,8 @@ def main(argv: list[str] | None = None) -> int:
             result = {"ok": False, "message": str(error)}
         print(json.dumps(result))
         return 0
+    if args.raid_login is not None:
+        return raid_login_command(args.raid_login)
     login = args.watch
     if not LOGIN_PATTERN.match(login):
         print(f"Invalid channel name: {login!r}", file=sys.stderr)
@@ -1000,6 +1394,7 @@ def main(argv: list[str] | None = None) -> int:
         args.media_title[:200],
         group_id,
         args.muted,
+        args.follow_raids,
     )
 
 
