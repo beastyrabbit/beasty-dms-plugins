@@ -36,13 +36,18 @@ PluginComponent {
     }
 
     function refresh(force) {
-        const age = Date.now() - (follows.fetchedAt ?? 0);
-        if (fetching || (!force && age < nextFetchSeconds * 800))
+        const now = Date.now();
+        const age = now - (follows.fetchedAt ?? 0);
+        // A fetch can outlast the 10 s retry, so at most one runs across all
+        // screens; a little longer than the 30 s after which the helper is stopped.
+        const running = now - (follows.fetchStartedAt ?? 0) < 35000;
+        if (fetching || running || (!force && age < nextFetchSeconds * 800))
             return;
         fetching = true;
         // Stamp the shared state first so the other screens' widgets skip this round.
         followsVar.set(Object.assign({}, follows, {
-            "fetchedAt": Date.now()
+            "fetchedAt": now,
+            "fetchStartedAt": now
         }));
         Proc.runCommand(fetchId, ["python3", helperPath, "--list"], (output, exitCode) => {
             root.fetching = false;
@@ -65,6 +70,7 @@ PluginComponent {
             if (!result.ok || result.message)
                 result.failures = (root.follows.failures ?? 0) + 1;
             result.fetchedAt = Date.now();
+            result.fetchStartedAt = 0;
             followsVar.set(result);
         }, 0, 30000, root);
     }
