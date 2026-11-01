@@ -110,7 +110,7 @@ def send(request: urllib.request.Request) -> dict[str, Any]:
         if not isinstance(reply, dict):
             reply = {}
         return {**reply, "status": error.code}
-    except (urllib.error.URLError, OSError, ValueError) as error:
+    except (OSError, ValueError) as error:  # URLError is an OSError
         raise TransientError(f"Could not reach Twitch: {error}") from None
 
 
@@ -178,38 +178,51 @@ def device_login(
     deadline = time.monotonic() + float(reply.get("expires_in") or 1800)
     while time.monotonic() < deadline:
         sleep(interval)
-        try:
-            token = post_form(
-                f"{ID_URL}/token",
-                {
-                    "client_id": client_id,
-                    "scopes": "",
-                    "device_code": reply["device_code"],
-                    "grant_type": DEVICE_GRANT,
-                },
-            )
-        except TransientError:
-            continue
-        message = str(token.get("message", ""))
-        if token.get("status"):
-            if "pending" in message:
-                continue
-            if "slow_down" in message:
-                interval += 5
-                continue
-            raise LoginError(message or "Twitch refused the login.")
-        user = validate(token["access_token"])
-        if user.get("status") or not user.get("user_id"):
-            raise LoginError("Twitch did not accept the new login.")
-        stored = {
-            "client_id": client_id,
-            "user_id": user["user_id"],
-            "login": user.get("login", ""),
-            "access_token": token["access_token"],
-            "refresh_token": token["refresh_token"],
-            "expires_at": time.time() + float(token.get("expires_in") or 0),
-        }
-        with token_lock():
-            write_token(stored)
-        return stored
+        token = poll_device_token(client_id, reply["device_code"])
+        if token == "slow_down":
+            interval += 5
+        elif isinstance(token, dict):
+            return store_device_login(client_id, token)
     raise LoginError("The login code expired before it was confirmed.")
+
+
+def poll_device_token(client_id: str, device_code: str) -> dict[str, Any] | str:
+    """One check whether the user has confirmed the code: the new token, or
+    "pending" / "slow_down" while Twitch wants this to keep waiting."""
+    try:
+        token = post_form(
+            f"{ID_URL}/token",
+            {
+                "client_id": client_id,
+                "scopes": "",
+                "device_code": device_code,
+                "grant_type": DEVICE_GRANT,
+            },
+        )
+    except TransientError:
+        return "pending"
+    if not token.get("status"):
+        return token
+    message = str(token.get("message", ""))
+    if "pending" in message:
+        return "pending"
+    if "slow_down" in message:
+        return "slow_down"
+    raise LoginError(message or "Twitch refused the login.")
+
+
+def store_device_login(client_id: str, token: dict[str, Any]) -> dict[str, Any]:
+    user = validate(token["access_token"])
+    if user.get("status") or not user.get("user_id"):
+        raise LoginError("Twitch did not accept the new login.")
+    stored = {
+        "client_id": client_id,
+        "user_id": user["user_id"],
+        "login": user.get("login", ""),
+        "access_token": token["access_token"],
+        "refresh_token": token["refresh_token"],
+        "expires_at": time.time() + float(token.get("expires_in") or 0),
+    }
+    with token_lock():
+        write_token(stored)
+    return stored

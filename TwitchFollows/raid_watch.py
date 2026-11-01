@@ -283,9 +283,11 @@ class Watcher:
         elif kind == "revocation":
             revoked = payload.get("subscription", {}).get("id")
             with self.lock:
-                for broadcaster, subscription in list(self.subscriptions.items()):
-                    if subscription == revoked:
-                        del self.subscriptions[broadcaster]
+                self.subscriptions = {
+                    broadcaster: subscription
+                    for broadcaster, subscription in self.subscriptions.items()
+                    if subscription != revoked
+                }
             log(
                 f"subscription revoked: {payload.get('subscription', {}).get('status')}"
             )
@@ -308,16 +310,21 @@ class Watcher:
             except Exception as error:  # noqa: BLE001 - keep watching
                 log(f"reconcile failed: {error!r}")
 
+    def idle(self, wanted: set[str], now: float) -> bool:
+        """True once no stream has followed raids for IDLE_EXIT_SECONDS."""
+        if wanted:
+            self.idle_since = None
+        elif self.idle_since is None:
+            self.idle_since = now
+        return (
+            self.idle_since is not None and now - self.idle_since >= IDLE_EXIT_SECONDS
+        )
+
     def reconcile(self, now: float) -> None:
         wanted = wanted_logins()
-        if not wanted:
-            if self.idle_since is None:
-                self.idle_since = now
-            elif now - self.idle_since >= IDLE_EXIT_SECONDS:
-                self.stopping.set()
-                return
-        else:
-            self.idle_since = None
+        if self.idle(wanted, now):
+            self.stopping.set()
+            return
         with self.lock:
             session = self.session_id
             subscriptions = dict(self.subscriptions)
@@ -337,37 +344,41 @@ class Watcher:
                 with self.lock:
                     self.subscriptions.pop(broadcaster, None)
         for broadcaster in wanted_ids - subscriptions.keys():
-            retry_at, wait = self.retry.get(broadcaster, (0.0, RETRY_SECONDS / 2))
-            if now < retry_at:
-                continue
-            reply = self.helix.subscribe(broadcaster, session)
-            data = reply.get("data") or [{}]
-            if reply.get("status") or not data[0].get("id"):
-                wait = min(wait * 2, MAX_RETRY_SECONDS)
-                self.retry[broadcaster] = (now + wait, wait)
-                log(
-                    f"subscribing to {broadcaster} failed: "
-                    f"{reply.get('status')} {reply.get('message', '')}"
-                )
-                continue
-            self.retry.pop(broadcaster, None)
-            with self.lock:
-                if self.session_id == session:
-                    self.subscriptions[broadcaster] = data[0]["id"]
+            self.subscribe(broadcaster, session, now)
+
+    def subscribe(self, broadcaster: str, session: str, now: float) -> None:
+        """Subscribes to one channel's raids, waiting longer after each
+        refusal."""
+        retry_at, wait = self.retry.get(broadcaster, (0.0, RETRY_SECONDS / 2))
+        if now < retry_at:
+            return
+        reply = self.helix.subscribe(broadcaster, session)
+        data = reply.get("data") or [{}]
+        if reply.get("status") or not data[0].get("id"):
+            wait = min(wait * 2, MAX_RETRY_SECONDS)
+            self.retry[broadcaster] = (now + wait, wait)
+            log(
+                f"subscribing to {broadcaster} failed: "
+                f"{reply.get('status')} {reply.get('message', '')}"
+            )
+            return
+        self.retry.pop(broadcaster, None)
+        with self.lock:
+            if self.session_id == session:
+                self.subscriptions[broadcaster] = data[0]["id"]
 
 
-def main() -> int:
+def main() -> None:
     lock = twitch_follows.try_lock(RAIDS_LOCK)
     if lock is None:
-        return 0  # another watcher runs
+        return  # another watcher runs
     with lock:
         if not raid_login.has_token():
-            return 0
+            return
         log("watcher started")
         Watcher(Helix()).run()
         log("watcher stopped")
-    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

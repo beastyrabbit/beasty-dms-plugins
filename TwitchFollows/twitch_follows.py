@@ -964,11 +964,7 @@ class Playback:
                 self.viewer.wait()
                 return True
             chat_sync.step(current)
-            if self.follow:
-                self.ensure_watcher()
-                raid = self.new_raid()
-                if raid:
-                    self.follow_raid(raid, current)
+            self.check_raids(current)
             if self.channel.relay.source_ended:
                 # Ended: mpv waits for a raid on the last picture, nothing to
                 # switch.
@@ -978,6 +974,30 @@ class Playback:
             else:
                 self.channel.switcher.step(0.2)
         return False
+
+    def check_raids(self, group: dict[str, Any] | None) -> None:
+        if not self.follow:
+            return
+        self.ensure_watcher()
+        raid = self.new_raid()
+        if raid:
+            self.follow_raid(raid, group)
+
+    def close(self, log_path: Path, lock: IO) -> None:
+        """Ends what play() and raids started: the switcher, the stream's place
+        in its group (its chat tab closes with it, and the chat window with
+        the group's last stream), the chat overlay and the channel lock."""
+        channel = self.channel
+        if channel:
+            channel.switcher.close()
+            if channel.switcher.source.log_path != log_path:
+                channel.switcher.source.log_path.unlink(missing_ok=True)
+            if channel.fifo:
+                channel.fifo.unlink(missing_ok=True)
+        if self.joined:
+            leave_group(channel.login, *self.joined)
+        self.stop_overlay()
+        (channel.lock if channel else lock).close()
 
     def ensure_watcher(self) -> None:
         """Starts raid_watch.py unless one runs; checked again now and then,
@@ -1255,26 +1275,11 @@ def play(
     finally:
         if chat_sync:
             chat_sync.close()
-        channel = playback.channel
-        if channel:
-            channel.switcher.close()
-            if channel.switcher.source.log_path != log_path:
-                channel.switcher.source.log_path.unlink(missing_ok=True)
-            if channel.fifo:
-                channel.fifo.unlink(missing_ok=True)
-        # The stream's chat tab closes with it, and the chat window with the
-        # group's last stream.
-        if playback.joined:
-            leave_group(channel.login, *playback.joined)
-        playback.stop_overlay()
-        if channel:
-            channel.lock.close()
-        else:
-            lock.close()
+        playback.close(log_path, lock)
         ipc_path.unlink(missing_ok=True)
     if stream_failed:
         notify(
-            f"Could not play {channel.login}",
+            f"Could not play {playback.channel.login}",
             lines[-1] if lines else "streamlink failed.",
         )
         return source.returncode

@@ -463,21 +463,10 @@ class Relay:
                     ready, _, _ = select.select(list(pipes), [], [], 0.1)
                 except (OSError, ValueError):
                     continue  # a withdrawn source's pipe closed under us
-                for pipe in ready:
-                    source = pipes[pipe]
-                    try:
-                        data = os.read(pipe.fileno(), 1 << 16)
-                    except (OSError, ValueError):
-                        if source is self.current:
-                            raise
-                        data = b""  # a withdrawn source's pipe closed under us
-                    with self.lock:
-                        out = self.take(source, data)
-                    self.write(out)
-                    if self.source_ended:
-                        if self.delivered:
-                            self.stopping.wait(self.hold_seconds)
-                        return
+                if self.relay_ready(pipes, ready):
+                    if self.delivered:
+                        self.stopping.wait(self.hold_seconds)
+                    return
                 # A held segment start may have waited long enough.
                 with self.lock:
                     out = self.advance(time.monotonic())
@@ -490,6 +479,24 @@ class Relay:
                 self.output.close()
             except OSError:
                 pass
+
+    def relay_ready(self, pipes: dict[BinaryIO, Source], ready: list[BinaryIO]) -> bool:
+        """Passes on what the ready sources wrote; True once the stream that
+        plays has ended."""
+        for pipe in ready:
+            source = pipes[pipe]
+            try:
+                data = os.read(pipe.fileno(), 1 << 16)
+            except (OSError, ValueError):
+                if source is self.current:
+                    raise
+                data = b""  # a withdrawn source's pipe closed under us
+            with self.lock:
+                out = self.take(source, data)
+            self.write(out)
+            if self.source_ended:
+                return True
+        return False
 
     def write(self, out: list[bytes]) -> None:
         # Called without the lock: mpv can be slow to take it.
