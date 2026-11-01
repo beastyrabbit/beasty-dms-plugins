@@ -9,6 +9,34 @@ PluginSettings {
 
     pluginId: "twitchFollows"
 
+    readonly property string helperPath: Paths.strip(Qt.resolvedUrl("twitch_follows.py"))
+    readonly property string statusId: "twitchFollowsRaidStatus"
+    property var raidStatus: ({})
+    property bool polling: false
+    property real loginStartedAt: 0
+
+    function refreshStatus() {
+        Proc.runCommand(statusId, ["python3", helperPath, "--raid-status"], (output, exitCode) => {
+            try {
+                raidStatus = JSON.parse(output.trim());
+            } catch (error) {
+                return;
+            }
+            // Also picks up a login started before these settings opened.
+            polling = raidStatus.running || Date.now() - loginStartedAt <= 5000;
+        }, 0, 10000, root);
+    }
+
+    function loginText() {
+        const status = raidStatus;
+        if (status.code)
+            return "Enter the code " + status.code + " on twitch.tv/activate (the page opened in your browser).";
+        if (status.running)
+            return "Asking Twitch for a code…";
+        const login = status.loggedIn ? "Logged in as " + (status.login || "you") + "." : "Not logged in.";
+        return status.error ? "Login failed: " + status.error + " " + login : login;
+    }
+
     StyledText {
         width: parent.width
         text: "Twitch Follows"
@@ -114,14 +142,42 @@ PluginSettings {
         placeholder: "Client ID"
     }
 
+    StyledText {
+        width: parent.width
+        text: root.loginText()
+        font.pixelSize: Theme.fontSizeMedium
+        color: root.raidStatus.error && !root.raidStatus.running ? Theme.error : Theme.surfaceText
+        wrapMode: Text.WordWrap
+    }
+
     DButton {
-        text: "Log in to Twitch"
-        // A notification shows the code; Twitch's page to confirm it opens in the browser.
-        // The field saves only on Enter or focus loss, so a pasted ID is saved here first;
-        // an empty or malformed one gets a notification from the script.
+        text: root.raidStatus.loggedIn ? "Log in again" : "Log in to Twitch"
+        enabled: !root.raidStatus.running
+        // The code shows above and in a notification; Twitch's page to confirm it opens in the
+        // browser. The field saves only on Enter or focus loss, so a pasted ID is saved here
+        // first; the script says when it is empty or malformed.
         onClicked: {
             clientIdSetting.commit();
-            Quickshell.execDetached(["systemd-run", "--user", "--scope", "--quiet", "--collect", "python3", Paths.strip(Qt.resolvedUrl("twitch_follows.py")), "--raid-login", clientIdSetting.value.trim()]);
+            Quickshell.execDetached(["systemd-run", "--user", "--scope", "--quiet", "--collect", "python3", root.helperPath, "--raid-login", clientIdSetting.value.trim()]);
+            root.loginStartedAt = Date.now();
+            root.polling = true;
         }
     }
+
+    // Polled only while a login runs (and a few seconds after the click, before the
+    // script has started); checked once whenever the settings show.
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.visible && root.polling
+        triggeredOnStart: true
+        onTriggered: root.refreshStatus()
+    }
+
+    onVisibleChanged: {
+        if (visible)
+            refreshStatus();
+    }
+    Component.onCompleted: refreshStatus()
+    Component.onDestruction: Proc.release(statusId)
 }
