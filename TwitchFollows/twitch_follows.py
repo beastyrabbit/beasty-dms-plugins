@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import fcntl
 import hashlib
 import http.client
@@ -18,6 +19,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -148,6 +150,23 @@ class TwitchError(Exception):
     pass
 
 
+# The widget fetches again soon after a failure, so these messages say so.
+NO_INTERNET = "No internet connection. Trying again shortly."
+NOT_RESPONDING = "Twitch is not responding. Trying again shortly."
+# No route at all, as right after boot before the network is up.
+OFFLINE_ERRNOS = {errno.ENETUNREACH, errno.ENETDOWN, errno.EHOSTUNREACH}
+
+
+def connection_error(reason: object) -> TwitchError:
+    if isinstance(reason, TimeoutError):
+        return TwitchError(NOT_RESPONDING)
+    if isinstance(reason, socket.gaierror) or (
+        isinstance(reason, OSError) and reason.errno in OFFLINE_ERRNOS
+    ):
+        return TwitchError(NO_INTERNET)
+    return TwitchError("Could not reach Twitch. Trying again shortly.")
+
+
 def chatterino_settings_paths() -> list[Path]:
     home = Path.home()
     data = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
@@ -200,8 +219,14 @@ def helix_get(
                 "The Chatterino login expired. Log in again in Chatterino."
             ) from None
         raise TwitchError(f"Twitch returned HTTP {error.code}.") from None
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        raise TwitchError("Could not reach Twitch.") from None
+    except urllib.error.URLError as error:
+        raise connection_error(error.reason) from None
+    except TimeoutError:
+        raise TwitchError(NOT_RESPONDING) from None
+    except json.JSONDecodeError:
+        raise TwitchError(
+            "Twitch sent an unreadable reply. Trying again shortly."
+        ) from None
 
 
 def helix_all(

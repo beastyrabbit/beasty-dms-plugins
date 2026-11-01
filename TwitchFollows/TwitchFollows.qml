@@ -20,6 +20,12 @@ PluginComponent {
     readonly property var liveChannels: follows.live ?? []
     readonly property bool hasError: follows.ok === false
     readonly property bool loaded: follows.ok !== undefined
+    // After a failed fetch, as when the network is not up yet after boot, fetch
+    // again in 10 s, doubling each time up to the normal interval.
+    readonly property int nextFetchSeconds: {
+        const failures = follows.failures ?? 0;
+        return failures ? Math.min(10 * Math.pow(2, failures - 1), refreshSeconds) : refreshSeconds;
+    }
     property bool fetching: false
     readonly property string fetchId: "twitchFollows.list." + Math.random().toString(36).slice(2)
     // Viewing groups (streams sharing one chat window), numbered in order.
@@ -31,7 +37,7 @@ PluginComponent {
 
     function refresh(force) {
         const age = Date.now() - (follows.fetchedAt ?? 0);
-        if (fetching || (!force && age < refreshSeconds * 800))
+        if (fetching || (!force && age < nextFetchSeconds * 800))
             return;
         fetching = true;
         // Stamp the shared state first so the other screens' widgets skip this round.
@@ -56,6 +62,8 @@ PluginComponent {
                 result = Object.assign({}, root.follows, {
                     "message": result.message
                 });
+            if (!result.ok || result.message)
+                result.failures = (root.follows.failures ?? 0) + 1;
             result.fetchedAt = Date.now();
             followsVar.set(result);
         }, 0, 30000, root);
@@ -93,7 +101,8 @@ PluginComponent {
 
     // pluginId is injected after creation; the shared state can't be written before it.
     Timer {
-        interval: root.refreshSeconds * 1000
+        // Changing the interval restarts the timer, so a failure retries soon.
+        interval: root.nextFetchSeconds * 1000
         repeat: true
         running: root.pluginId !== ""
         triggeredOnStart: true

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import errno
 import http.client
 import importlib.util
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -133,6 +135,36 @@ class FetchTests(unittest.TestCase):
         with (
             patch.object(twitch_follows.urllib.request, "urlopen", side_effect=error),
             self.assertRaisesRegex(twitch_follows.TwitchError, "expired"),
+        ):
+            twitch_follows.helix_get(ACCOUNT, "streams/followed", {})
+
+    def test_connection_errors_name_their_cause(self) -> None:
+        cases = [
+            (urllib.error.URLError(socket.gaierror(-3, "again")), "No internet"),
+            (
+                urllib.error.URLError(OSError(errno.ENETUNREACH, "unreachable")),
+                "No internet",
+            ),
+            (urllib.error.URLError(TimeoutError()), "not responding"),
+            (TimeoutError(), "not responding"),
+            (urllib.error.URLError(ConnectionRefusedError()), "Could not reach"),
+        ]
+        for error, message in cases:
+            with (
+                self.subTest(error=error),
+                patch.object(
+                    twitch_follows.urllib.request, "urlopen", side_effect=error
+                ),
+                self.assertRaisesRegex(twitch_follows.TwitchError, message),
+            ):
+                twitch_follows.helix_get(ACCOUNT, "streams/followed", {})
+        with (
+            patch.object(
+                twitch_follows.urllib.request,
+                "urlopen",
+                return_value=io.BytesIO(b"<html>"),
+            ),
+            self.assertRaisesRegex(twitch_follows.TwitchError, "unreadable"),
         ):
             twitch_follows.helix_get(ACCOUNT, "streams/followed", {})
 
