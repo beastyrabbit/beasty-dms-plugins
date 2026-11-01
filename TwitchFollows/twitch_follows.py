@@ -1109,7 +1109,9 @@ class Playback:
             self.channel = Channel(target, lock, relay, switcher, time.time(), fifo)
             self.stop_overlay()
             mpv.send(["overlay-remove", IMAGE_OVERLAY_ID])
-            in_mpv = self.chat_always_in_mpv or bool(group and group.get("chatInMpv"))
+            # The group's chat mode, which the chat button keeps up to date;
+            # without Chatterino, that is whether the chat is shown at all.
+            in_mpv = bool(group.get("chatInMpv")) if group else self.chat_always_in_mpv
             self.start_overlay(target, hidden=not in_mpv, loading=False)
             # Video back on in case audio only had turned it off; an audio-only
             # stream simply has none.

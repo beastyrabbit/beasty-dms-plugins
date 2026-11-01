@@ -539,11 +539,16 @@ open(runtime + f"/{{channel}}.done", "a").close()
             json.dumps(raids)
         )
 
-    def play(self, raids: list[tuple[str, str, str]], grace: float) -> list[int]:
+    def play(
+        self, raids: list[tuple[str, str, str]], grace: float, hide_chat: bool = False
+    ) -> list[int]:
         """Watches big; each raid (when, source, target) is sent once mpv shows
-        that width ("320") or once that channel's streamlink ended ("done:big").
-        Returns the widths mpv showed, in order."""
+        that width ("320") or once that channel's streamlink ended ("done:big"),
+        after hiding the chat with the chat button when hide_chat is set.
+        Returns the widths mpv showed, in order; self.overlays says for each
+        chat overlay started whether it started hidden."""
         widths: list[int] = []
+        self.overlays: list[bool] = []
         pending = list(raids)
         finished = threading.Event()
 
@@ -575,6 +580,9 @@ open(runtime + f"/{{channel}}.done", "a").close()
                 if ready:
                     number += 1
                     (self.runtime / f"{source}.done").unlink(missing_ok=True)
+                    if hide_chat:
+                        group = twitch_follows.load_groups()[0]["id"]
+                        twitch_follows.set_chat_mode(group, in_mpv=False)
                     self.raid(source, target, number)
                     pending.pop(0)
                 time.sleep(0.1)
@@ -590,8 +598,9 @@ open(runtime + f"/{{channel}}.done", "a").close()
             patch.object(
                 twitch_follows.Playback,
                 "start_overlay",
-                lambda self, *a, **k: setattr(
-                    self, "overlay", subprocess.Popen(["sleep", "30"])
+                lambda playback, login, hidden, loading=True: (
+                    self.overlays.append(hidden),
+                    setattr(playback, "overlay", subprocess.Popen(["sleep", "30"])),
                 ),
             ),
             patch.object(twitch_follows, "RAID_GRACE_SECONDS", grace),
@@ -625,6 +634,12 @@ open(runtime + f"/{{channel}}.done", "a").close()
         self.assertEqual(widths[0], 320)
         self.assertIn(640, widths)
         self.assertEqual(self.streamlink_runs(), ["big", "small"])
+        # Without Chatterino, chat starts in mpv.
+        self.assertEqual(self.overlays, [False, False])
+
+    def test_chat_hidden_with_the_button_stays_hidden_after_a_raid(self) -> None:
+        self.play([("320", "big", "small")], grace=1, hide_chat=True)
+        self.assertEqual(self.overlays, [False, True])
 
     def test_a_raid_announced_after_the_stream_ended_is_still_followed(self) -> None:
         widths = self.play([("done:big", "big", "small")], grace=8)
