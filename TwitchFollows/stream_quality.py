@@ -15,6 +15,7 @@ boundaries, so mpv plays on without reloading and keeps its rewind buffer.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import select
@@ -338,6 +339,10 @@ class Source:
         self.log_path.unlink(missing_ok=True)
 
 
+class Stopped(Exception):
+    """Relay.stop() interrupted a write."""
+
+
 class Relay:
     """Copies the current source into mpv, and splices in a pending source at
     the first segment both have.
@@ -350,10 +355,30 @@ class Relay:
     until the other thread releases it (see DRAINED_SECONDS). Runs on its own
     thread. The other thread offers, releases or withdraws a pending source and
     collects finished splices.
+
+    When the current source ends, the relay can keep mpv's input open for
+    `hold_seconds` instead of closing it at once: mpv waits on the last picture
+    meanwhile, so a raid announced just after the broadcast ended can still
+    take the window over. `stop()` ends the relay at any time, even while mpv
+    has stopped reading (writes to a pipe or FIFO don't block).
     """
 
-    def __init__(self, output: BinaryIO, source: Source) -> None:
+    def __init__(
+        self, output: BinaryIO, source: Source, hold_seconds: float = 0
+    ) -> None:
         self.output = output
+        # A real pipe is written without blocking, so stop() can't hang on a
+        # reader that went away (as stdin does once mpv loads another file).
+        try:
+            self.fd: int | None = output.fileno()
+            os.set_blocking(self.fd, False)
+        except (AttributeError, OSError, ValueError):
+            self.fd = None
+        self.hold_seconds = hold_seconds
+        # Only a stream that played is held: one that fails to start ends
+        # (and says why) at once.
+        self.delivered = False
+        self.stopping = threading.Event()
         self.current = source
         self.pending: Source | None = None
         self.pending_ended = False
@@ -378,6 +403,12 @@ class Relay:
 
     def start(self) -> None:
         self.thread.start()
+
+    def stop(self, timeout: float = 2) -> None:
+        """Ends the relay and closes mpv's input; the sources keep running."""
+        self.stopping.set()
+        if self.thread.is_alive():
+            self.thread.join(timeout)
 
     def offer(self, source: Source) -> None:
         with self.lock:
@@ -422,7 +453,7 @@ class Relay:
 
     def run(self) -> None:
         try:
-            while True:
+            while not self.stopping.is_set():
                 with self.lock:
                     sources = [self.current]
                     if self.pending and not self.pending_ended:
@@ -444,13 +475,15 @@ class Relay:
                         out = self.take(source, data)
                     self.write(out)
                     if self.source_ended:
+                        if self.delivered:
+                            self.stopping.wait(self.hold_seconds)
                         return
                 # A held segment start may have waited long enough.
                 with self.lock:
                     out = self.advance(time.monotonic())
                 self.write(out)
-        except (OSError, ValueError):
-            pass  # mpv has gone
+        except (OSError, ValueError, Stopped):
+            pass  # mpv has gone, or stop()
         finally:
             self.finished.set()
             try:
@@ -460,10 +493,24 @@ class Relay:
 
     def write(self, out: list[bytes]) -> None:
         # Called without the lock: mpv can be slow to take it.
-        if out:
+        if not out:
+            return
+        if any(out):
+            self.delivered = True
+        if self.fd is None:
             for piece in out:
                 self.output.write(piece)
             self.output.flush()
+            return
+        for piece in out:
+            view = memoryview(piece)
+            while view:
+                if self.stopping.is_set():
+                    raise Stopped
+                _, ready, _ = select.select([], [self.fd], [], 0.1)
+                if ready:
+                    with contextlib.suppress(BlockingIOError):
+                        view = view[os.write(self.fd, view) :]
 
     def take(self, source: Source, data: bytes) -> list[bytes]:
         """Takes what a source has written and returns what mpv gets now."""

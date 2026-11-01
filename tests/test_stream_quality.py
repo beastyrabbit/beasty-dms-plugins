@@ -429,6 +429,59 @@ class RelayTests(unittest.TestCase):
         self.assertFalse(relay.finished.is_set())
         old_in.close()
 
+    def test_holds_mpvs_input_open_after_the_stream_ends_until_stopped(self) -> None:
+        old, old_in = self.pipe_source("1080p60")
+        output = Collector()
+        relay = stream_quality.Relay(output, old, hold_seconds=30)
+        relay.start()
+        old_in.write(segment(10, b"A"))
+        old_in.close()
+        wait_until(lambda: relay.source_ended)
+        time.sleep(0.2)
+        self.assertFalse(output.closed.is_set())
+        self.assertFalse(relay.finished.is_set())
+        relay.stop()
+        self.assertTrue(relay.finished.is_set())
+        self.assertTrue(output.closed.is_set())
+        self.assertEqual(output.data, segment(10, b"A"))
+
+    def test_a_stream_that_never_played_is_not_held(self) -> None:
+        # As when streamlink fails at once: the error shows without a wait.
+        old, old_in = self.pipe_source("1080p60")
+        output = Collector()
+        relay = stream_quality.Relay(output, old, hold_seconds=30)
+        relay.start()
+        old_in.close()
+        self.assertTrue(relay.finished.wait(2))
+
+    def test_the_hold_ends_on_its_own(self) -> None:
+        old, old_in = self.pipe_source("1080p60")
+        output = Collector()
+        relay = stream_quality.Relay(output, old, hold_seconds=0.2)
+        relay.start()
+        old_in.write(segment(10, b"A"))
+        old_in.close()
+        self.assertTrue(relay.finished.wait(2))
+        self.assertTrue(output.closed.is_set())
+
+    def test_stop_returns_while_nobody_reads_mpvs_input(self) -> None:
+        # As stdin once mpv has loaded another file: the pipe fills up.
+        old, old_in = self.pipe_source("1080p60")
+        read, write = os.pipe()
+        self.addCleanup(os.close, read)
+        relay = stream_quality.Relay(os.fdopen(write, "wb"), old)
+        relay.start()
+        # More than the pipe holds; written from a thread, as streamlink would.
+        data = segment(10, b"A", packets=2000)
+        feeder = threading.Thread(target=old_in.write, args=(data,), daemon=True)
+        feeder.start()
+        time.sleep(0.3)
+        self.assertFalse(relay.finished.is_set())
+        started = time.monotonic()
+        relay.stop()
+        self.assertTrue(relay.finished.is_set())
+        self.assertLess(time.monotonic() - started, 1)
+
     def test_mpv_closing_ends_the_relay_without_the_stream_ending(self) -> None:
         old, old_in = self.pipe_source("1080p60")
         output = Collector()

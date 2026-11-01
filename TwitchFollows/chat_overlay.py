@@ -335,11 +335,15 @@ def connect_mpv(path: str) -> Mpv | None:
 class Overlay:
     """Keeps mpv's chat overlay in step with the chat feed and the user's toggles."""
 
-    def __init__(self, mpv: Mpv, channel: str, ipc_path: str, hidden: bool) -> None:
+    def __init__(
+        self, mpv: Mpv, channel: str, ipc_path: str, hidden: bool, loading: bool = True
+    ) -> None:
         self.mpv = mpv
         self.channel = channel
         self.hidden = hidden
-        self.loading = True
+        # Shows "Loading" until the stream plays; not when it takes over a
+        # window that already plays (after a raid).
+        self.loading = loading
         self.last_draw = 0.0
         self.animated = False
         self.image_shown = False
@@ -368,7 +372,8 @@ class Overlay:
         self.mpv.send(["keybind", TOGGLE_KEY, f"script-message {TOGGLE_MESSAGE}"])
         self.mpv.send(["keybind", LIVE_KEY, f"script-message {LIVE_MESSAGE}"])
         # Twitch pre-roll ads can hold back the video for half a minute.
-        self.mpv.send(["show-text", f"Loading {self.channel}…", 60000])
+        if self.loading:
+            self.mpv.send(["show-text", f"Loading {self.channel}…", 60000])
         try:
             while True:
                 for event in self.mpv.events(timeout=self.wait_time()):
@@ -454,19 +459,26 @@ class Overlay:
             self.image_shown = False
 
 
-def run(channel: str, ipc_path: str, hidden: bool = False) -> int:
+def run(channel: str, ipc_path: str, hidden: bool = False, loading: bool = True) -> int:
     mpv = connect_mpv(ipc_path)
     if not mpv:
         return 1
-    return Overlay(mpv, channel, ipc_path, hidden).run()
+    return Overlay(mpv, channel, ipc_path, hidden, loading).run()
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (3, 4) or sys.argv[3:] not in ([], ["--hidden"]):
+    flags = sys.argv[3:]
+    if len(sys.argv) < 3 or not set(flags) <= {"--hidden", "--no-loading"}:
         print(
-            "usage: chat_overlay.py CHANNEL MPV_IPC_SOCKET [--hidden]", file=sys.stderr
+            "usage: chat_overlay.py CHANNEL MPV_IPC_SOCKET [--hidden] [--no-loading]",
+            file=sys.stderr,
         )
         raise SystemExit(2)
     raise SystemExit(
-        run(sys.argv[1].lower(), sys.argv[2], sys.argv[3:] == ["--hidden"])
+        run(
+            sys.argv[1].lower(),
+            sys.argv[2],
+            "--hidden" in flags,
+            "--no-loading" not in flags,
+        )
     )

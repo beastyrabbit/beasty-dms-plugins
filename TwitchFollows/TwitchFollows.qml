@@ -13,6 +13,7 @@ PluginComponent {
     readonly property int refreshSeconds: parseInt(pluginData.refreshSeconds ?? "120") || 120
     readonly property string quality: pluginData.quality || "best"
     readonly property bool chatInPlayer: pluginData.chatInPlayer ?? false
+    readonly property bool followRaids: pluginData.followRaids ?? true
     readonly property string volume: String(pluginData.volume ?? "30")
 
     // Shared by every bar instance (one per screen), so only one fetch runs per interval.
@@ -89,6 +90,8 @@ PluginComponent {
             args.push("--muted");
         if (chatInPlayer)
             args.push("--chat-in-player");
+        if (followRaids)
+            args.push("--follow-raids");
         if (groupId)
             args.push("--group", groupId);
         launch(args);
