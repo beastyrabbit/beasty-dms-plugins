@@ -130,6 +130,9 @@ RAID_TTL_SECONDS = 120
 RAID_GRACE_SECONDS = 20
 # How often a stream that follows raids makes sure a watcher runs.
 WATCHER_CHECK_SECONDS = 30
+# A running --raid-login's progress for the settings page: its pid and the
+# code to confirm, or why it failed. Never the token.
+RAID_LOGIN_FILE = "twitch-follows-raid-login.json"
 IPC_REQUEST_ID = 9
 DEFAULT_VOLUME = 30
 REWIND_BUFFER = "2300MiB"
@@ -1304,6 +1307,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="CLIENT_ID",
         help="log in with the plugin's own Twitch app, for following raids",
     )
+    group.add_argument(
+        "--raid-status",
+        action="store_true",
+        help="print the raid-following login state as JSON, for the settings",
+    )
     parser.add_argument(
         "--quality", default="best", help="streamlink quality for --watch"
     )
@@ -1340,14 +1348,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def write_login_progress(progress: dict[str, Any] | None) -> None:
+    path = runtime_path(RAID_LOGIN_FILE)
+    if progress is None:
+        path.unlink(missing_ok=True)
+        return
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(progress))
+    temporary.replace(path)
+
+
+def raid_status() -> dict[str, Any]:
+    """What the settings page shows: who is logged in, and the code of a login
+    that waits to be confirmed, or why the last one failed."""
+    token = raid_login.read_token()
+    try:
+        progress = json.loads(runtime_path(RAID_LOGIN_FILE).read_text())
+    except (OSError, ValueError):
+        progress = {}
+    if not isinstance(progress, dict):
+        progress = {}
+    running = pid_alive(progress.get("pid"))
+    return {
+        "loggedIn": token is not None,
+        "login": str(token.get("login") or "") if token else "",
+        "running": running,
+        "code": str(progress.get("code") or "") if running else "",
+        "error": str(progress.get("error") or ""),
+    }
+
+
 def raid_login_command(client_id: str) -> int:
-    """Logs in for following raids: a notification shows the code, and the
-    browser opens Twitch's page to confirm it."""
+    """Logs in for following raids: the settings page and a notification show
+    the code, and the browser opens Twitch's page to confirm it."""
     if not raid_login.CLIENT_ID_PATTERN.match(client_id):
+        write_login_progress({"error": "That is not a Twitch client ID."})
         notify("Raid following", "That is not a Twitch client ID.")
         return 2
+    write_login_progress({"pid": os.getpid()})
 
     def show_code(code: str, url: str) -> None:
+        write_login_progress({"pid": os.getpid(), "code": code})
         notify("Log in to follow raids", f"Confirm the code {code} on Twitch.")
         opener = shutil.which("xdg-open")
         if opener:
@@ -1362,8 +1403,10 @@ def raid_login_command(client_id: str) -> int:
     try:
         token = raid_login.device_login(client_id, show_code)
     except (raid_login.LoginError, raid_login.TransientError) as error:
+        write_login_progress({"error": str(error)})
         notify("Could not log in to follow raids", str(error))
         return 1
+    write_login_progress(None)
     notify("Raid following is on", f"Logged in as {token.get('login') or 'you'}.")
     return 0
 
@@ -1379,6 +1422,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.raid_login is not None:
         return raid_login_command(args.raid_login)
+    if args.raid_status:
+        print(json.dumps(raid_status()))
+        return 0
     login = args.watch
     if not LOGIN_PATTERN.match(login):
         print(f"Invalid channel name: {login!r}", file=sys.stderr)

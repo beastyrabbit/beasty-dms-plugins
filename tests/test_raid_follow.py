@@ -147,6 +147,66 @@ class LoginTests(TempDirs):
             self.assertEqual(twitch_follows.main(["--raid-login", "a b;c"]), 2)
         login.assert_not_called()
         notify.assert_called_once()
+        self.assertEqual(
+            twitch_follows.raid_status()["error"], "That is not a Twitch client ID."
+        )
+
+    def test_the_settings_see_the_code_while_waiting_then_who_is_logged_in(
+        self,
+    ) -> None:
+        def status() -> dict:
+            with patch("builtins.print") as printed:
+                self.assertEqual(twitch_follows.main(["--raid-status"]), 0)
+            return json.loads(printed.call_args.args[0])
+
+        seen = []
+
+        def device_login(client_id, show_code):
+            show_code("ABCD-EFGH", "https://www.twitch.tv/activate")
+            seen.append(status())
+            raid_login.write_token(TOKEN)
+            return TOKEN
+
+        self.assertFalse(status()["loggedIn"])
+        with (
+            patch.object(twitch_follows, "notify"),
+            patch.object(twitch_follows.shutil, "which", return_value=None),
+            patch.object(raid_login, "device_login", side_effect=device_login),
+        ):
+            self.assertEqual(
+                twitch_follows.main(["--raid-login", TOKEN["client_id"]]), 0
+            )
+        self.assertEqual(seen[0]["code"], "ABCD-EFGH")
+        self.assertTrue(seen[0]["running"])
+        done = status()
+        self.assertEqual(
+            done,
+            {
+                "loggedIn": True,
+                "login": "viewer",
+                "running": False,
+                "code": "",
+                "error": "",
+            },
+        )
+        self.assertNotIn(TOKEN["access_token"], json.dumps(done))
+
+    def test_the_settings_see_why_a_login_failed(self) -> None:
+        with (
+            patch.object(twitch_follows, "notify"),
+            patch.object(
+                raid_login,
+                "device_login",
+                side_effect=raid_login.LoginError("authorization_declined"),
+            ),
+        ):
+            self.assertEqual(
+                twitch_follows.main(["--raid-login", TOKEN["client_id"]]), 1
+            )
+        status = twitch_follows.raid_status()
+        self.assertEqual(status["error"], "authorization_declined")
+        self.assertFalse(status["running"])
+        self.assertFalse(status["loggedIn"])
 
 
 class FakeSocket:
