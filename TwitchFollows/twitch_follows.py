@@ -46,6 +46,7 @@ AVATAR_TIMEOUT_SECONDS = 5
 # All downloads together, well within the 30 seconds the list may take.
 AVATAR_DEADLINE_SECONDS = 10
 MAX_PAGES = 20
+SEARCH_RESULTS = "20"
 CHATTERINO_FLATPAK_ID = "com.chatterino.chatterino"
 CHATTERINO_CLASSES = {CHATTERINO_FLATPAK_ID, "chatterino"}
 CHAT_WINDOW_WAIT_SECONDS = 20
@@ -350,6 +351,33 @@ def fetch_follows(account: dict[str, str]) -> dict[str, Any]:
         for stream in sorted(streams, key=lambda s: -s.get("viewer_count", 0))
     ]
     return {"ok": True, "user": account.get("username", ""), "live": live}
+
+
+def search_live(account: dict[str, str], query: str) -> dict[str, Any]:
+    """Live channels matching the query, followed or not. An exact login
+    comes first: Twitch's own order is fuzzy."""
+    channels = helix_get(
+        account,
+        "search/channels",
+        {"query": query, "live_only": "true", "first": SEARCH_RESULTS},
+    ).get("data", [])
+    wanted = query.strip().lower()
+    channels.sort(key=lambda c: c.get("broadcaster_login", "").lower() != wanted)
+    live = [
+        {
+            "login": channel["broadcaster_login"],
+            "name": channel.get("display_name") or channel["broadcaster_login"],
+            # Search results come and go, so their avatars load from Twitch
+            # instead of filling the follows' avatar cache.
+            "avatar": channel.get("thumbnail_url", "").replace("-300x300.", "-70x70."),
+            "title": channel.get("title", ""),
+            "game": channel.get("game_name", ""),
+        }
+        for channel in channels
+        if channel.get("is_live", True)
+        and LOGIN_PATTERN.match(channel.get("broadcaster_login", ""))
+    ]
+    return {"ok": True, "query": query, "live": live}
 
 
 # chat_overlay.VISIBLE_PROPERTY: "yes" while chat shows in mpv.
@@ -1298,6 +1326,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--list", action="store_true", help="print followed channels as JSON"
     )
     group.add_argument(
+        "--search",
+        metavar="QUERY",
+        help="print live channels matching QUERY as JSON, followed or not",
+    )
+    group.add_argument(
         "--watch",
         metavar="LOGIN",
         help="play a channel in mpv, grouped with its chat in Chatterino",
@@ -1418,6 +1451,18 @@ def main(argv: list[str] | None = None) -> int:
             result = fetch_follows(load_account())
         except TwitchError as error:
             result = {"ok": False, "message": str(error)}
+        print(json.dumps(result))
+        return 0
+    if args.search is not None:
+        query = args.search.strip()[:100]
+        try:
+            result = (
+                search_live(load_account(), query)
+                if query
+                else {"ok": True, "query": query, "live": []}
+            )
+        except TwitchError as error:
+            result = {"ok": False, "query": query, "message": str(error)}
         print(json.dumps(result))
         return 0
     if args.raid_login is not None:

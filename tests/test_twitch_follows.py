@@ -130,6 +130,65 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(calls[-1], ("users", {"id": ["2", "1"]}))
         self.assertEqual(len(calls), 3)
 
+    def test_search_lists_live_channels_with_the_exact_login_first(self) -> None:
+        calls = []
+
+        def fake_get(account, endpoint, params):
+            calls.append((endpoint, params))
+            return {
+                "data": [
+                    {
+                        "broadcaster_login": "pokimanefan",
+                        "display_name": "PokimaneFan",
+                        "is_live": True,
+                        "thumbnail_url": "https://cdn/fan-300x300.png",
+                        "title": "hi",
+                        "game_name": "Chat",
+                    },
+                    {"broadcaster_login": "offline", "is_live": False},
+                    {"broadcaster_login": "bad name!", "is_live": True},
+                    {"broadcaster_login": "pokimane", "is_live": True},
+                ]
+            }
+
+        with patch.object(twitch_follows, "helix_get", fake_get):
+            result = twitch_follows.search_live(ACCOUNT, "Pokimane")
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "search/channels",
+                    {"query": "Pokimane", "live_only": "true", "first": "20"},
+                )
+            ],
+        )
+        self.assertEqual(result["query"], "Pokimane")
+        self.assertEqual(
+            [c["login"] for c in result["live"]], ["pokimane", "pokimanefan"]
+        )
+        self.assertEqual(result["live"][0]["name"], "pokimane")
+        self.assertEqual(result["live"][1]["avatar"], "https://cdn/fan-70x70.png")
+        self.assertEqual(result["live"][1]["game"], "Chat")
+
+    def test_search_reports_errors_and_skips_empty_queries(self) -> None:
+        output = io.StringIO()
+        with (
+            patch.object(twitch_follows, "load_account", return_value=ACCOUNT),
+            patch.object(
+                twitch_follows,
+                "helix_get",
+                side_effect=twitch_follows.TwitchError("offline"),
+            ) as helix,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(twitch_follows.main(["--search", " x "]), 0)
+            self.assertEqual(twitch_follows.main(["--search", "  "]), 0)
+        failed, empty = (json.loads(line) for line in output.getvalue().splitlines())
+        self.assertEqual(failed, {"ok": False, "query": "x", "message": "offline"})
+        self.assertEqual(empty, {"ok": True, "query": "", "live": []})
+        self.assertEqual(helix.call_count, 1)
+
     def test_expired_login_has_clear_message(self) -> None:
         error = urllib.error.HTTPError("url", 401, "Unauthorized", {}, None)
         with (
