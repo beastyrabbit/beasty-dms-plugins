@@ -94,6 +94,8 @@ PluginComponent {
             searchResult = {};
             return;
         }
+        // Old results go at once, so Enter can't watch a match for an old query.
+        searchResult = {};
         searching = true;
         Proc.runCommand(searchId, ["python3", helperPath, "--search", query], (output, exitCode) => {
             let result = null;
@@ -238,10 +240,10 @@ PluginComponent {
                 if (root.searchQuery) {
                     if (root.searchResult.message)
                         return root.searchResult.message;
-                    if (root.searching && root.searchResult.live === undefined)
+                    if (root.searching)
                         return "Searching live channels…";
                     const found = root.searchResult.live?.length ?? 0;
-                    if (found === 0 && !root.searching)
+                    if (found === 0)
                         return "Nobody matching “" + root.searchQuery + "” is live.";
                     return found + " live " + (found === 1 ? "channel" : "channels") + " found";
                 }
