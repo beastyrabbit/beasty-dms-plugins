@@ -31,6 +31,14 @@ PluginComponent {
     readonly property string fetchId: "twitchFollows.list." + Math.random().toString(36).slice(2)
     // Viewing groups (streams sharing one chat window), numbered in order.
     property var groups: []
+    // Live channels found by the search field, followed or not. Each screen's
+    // widget searches on its own; closing the list clears the search.
+    property string searchText: ""
+    readonly property string searchQuery: searchText.trim()
+    property var searchResult: ({})
+    property bool searching: false
+    readonly property string searchId: "twitchFollows.search." + Math.random().toString(36).slice(2)
+    readonly property var shownChannels: searchQuery ? (searchResult.live ?? []) : liveChannels
 
     function groupOf(login) {
         return groups.findIndex(group => group.streams.some(stream => stream.login === login));
@@ -76,6 +84,45 @@ PluginComponent {
         }, 0, 30000, root);
     }
 
+    // Waits until typing pauses. A helper that finishes after a newer search
+    // started reports an old query, which is dropped.
+    function search() {
+        const query = searchQuery;
+        if (!query) {
+            Proc.release(searchId);
+            searching = false;
+            searchResult = {};
+            return;
+        }
+        // Old results go at once, so Enter can't watch a match for an old query.
+        searchResult = {};
+        searching = true;
+        Proc.runCommand(searchId, ["python3", helperPath, "--search", query], (output, exitCode) => {
+            let result = null;
+            try {
+                result = JSON.parse(output.trim());
+            } catch (error) {
+                result = null;
+            }
+            if (exitCode !== 0 || !result)
+                result = {
+                    "ok": false,
+                    "query": root.searchQuery,
+                    "message": "The Twitch helper failed."
+                };
+            if (result.query !== root.searchQuery)
+                return;
+            root.searching = false;
+            root.searchResult = result;
+        }, 400, 15000, root);
+    }
+
+    onSearchQueryChanged: search()
+    onInteractionActiveChanged: {
+        if (!interactionActive)
+            searchText = "";
+    }
+
     // dms.service stops its whole cgroup on restart, which would close open
     // streams; a separate scope keeps players and chat running across restarts.
     function launch(args) {
@@ -99,7 +146,10 @@ PluginComponent {
 
     popoutWidth: 440
     popoutHeight: 520
-    Component.onDestruction: Proc.release(fetchId)
+    Component.onDestruction: {
+        Proc.release(fetchId);
+        Proc.release(searchId);
+    }
 
     PluginGlobalVar {
         id: followsVar
@@ -187,6 +237,16 @@ PluginComponent {
 
             headerText: "Twitch"
             detailsText: {
+                if (root.searchQuery) {
+                    if (root.searchResult.message)
+                        return root.searchResult.message;
+                    if (root.searching)
+                        return "Searching live channels…";
+                    const found = root.searchResult.live?.length ?? 0;
+                    if (found === 0)
+                        return "Nobody matching “" + root.searchQuery + "” is live.";
+                    return found + " live " + (found === 1 ? "channel" : "channels") + " found";
+                }
                 if (root.follows.message)
                     return root.follows.message;
                 if (!root.loaded)
@@ -205,6 +265,48 @@ PluginComponent {
                 }
             }
 
+            // Opening the list focuses the popout around it (for Escape), so typing
+            // would go nowhere; hand that focus on to the search field.
+            Connections {
+                function onActiveFocusItemChanged() {
+                    const focused = popout.Window.window.activeFocusItem;
+                    for (let item = popout.parent; item && root.interactionActive; item = item.parent) {
+                        if (item === focused) {
+                            searchField.forceActiveFocus();
+                            return;
+                        }
+                    }
+                }
+
+                target: popout.Window.window
+            }
+
+            // The field with a gap below it, between the details and the list.
+            Item {
+                id: searchBar
+
+                width: parent.width
+                height: searchField.height + Theme.spacingS
+
+                DSearchField {
+                    id: searchField
+
+                    width: parent.width
+                    height: Theme.buttonHeightS
+                    placeholderText: "Search live channels…"
+                    maximumLength: 100
+                    busy: root.searching
+                    text: root.searchText
+                    onTextChanged: root.searchText = text
+                    // Enter watches the first channel found.
+                    onAccepted: {
+                        if (root.searchQuery && root.shownChannels.length > 0)
+                            root.watch(root.shownChannels[0], false, "");
+                    }
+                    Component.onCompleted: Qt.callLater(() => searchField.forceActiveFocus())
+                }
+            }
+
             DListView {
                 id: channelList
 
@@ -213,7 +315,7 @@ PluginComponent {
                 readonly property real room: {
                     const screenRoom = popout.parentPopout?.maxBodyHeight ?? 0;
                     const total = screenRoom > 0 ? screenRoom : root.popoutHeight;
-                    return total - popout.headerHeight - popout.detailsHeight - PopoutMetrics.contentPadding * 2;
+                    return total - popout.headerHeight - popout.detailsHeight - searchBar.height - PopoutMetrics.contentPadding * 2;
                 }
 
                 width: parent.width
@@ -221,7 +323,7 @@ PluginComponent {
                 interactive: contentHeight > room
                 clip: true
                 spacing: 2
-                model: root.liveChannels
+                model: root.shownChannels
 
                 delegate: Rectangle {
                     id: row
