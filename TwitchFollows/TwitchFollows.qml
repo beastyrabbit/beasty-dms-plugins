@@ -39,6 +39,9 @@ PluginComponent {
     property bool searching: false
     readonly property string searchId: "twitchFollows.search." + Math.random().toString(36).slice(2)
     readonly property var shownChannels: searchQuery ? (searchResult.live ?? []) : liveChannels
+    // The bar shows everyone live as avatars, biggest stream first, nearly as
+    // tall as the pill (the bar's icon sizes come out much smaller).
+    readonly property real barAvatarSize: Math.max(root.iconSize, root.widgetThickness - 4)
 
     function groupOf(login) {
         return groups.findIndex(group => group.streams.some(stream => stream.login === login));
@@ -191,22 +194,41 @@ PluginComponent {
         onTriggered: groupsFile.reload()
     }
 
+    // Until someone is live (or while loading, or after an error) the bar keeps
+    // the icon and a count, so the widget never vanishes.
     horizontalBarPill: Component {
         Row {
             spacing: Theme.spacingXS
 
             DIcon {
+                visible: root.liveChannels.length === 0
                 name: "live_tv"
                 size: root.iconSize
-                color: root.liveChannels.length > 0 ? Theme.primary : Theme.surfaceVariantText
+                color: Theme.surfaceVariantText
                 anchors.verticalCenter: parent.verticalCenter
             }
 
             StyledText {
-                text: root.loaded ? String(root.liveChannels.length) : "–"
+                visible: root.liveChannels.length === 0
+                text: root.loaded ? "0" : "–"
                 font.pixelSize: root.textSize
                 color: root.hasError ? Theme.error : Theme.surfaceText
                 anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Repeater {
+                model: root.liveChannels
+
+                delegate: DCircularImage {
+                    required property var modelData
+
+                    width: root.barAvatarSize
+                    height: root.barAvatarSize
+                    anchors.verticalCenter: parent.verticalCenter
+                    imageSource: modelData.avatar ?? ""
+                    fallbackText: (modelData.name ?? "?").charAt(0).toUpperCase()
+                    ringWidth: 0
+                }
             }
         }
     }
@@ -216,17 +238,34 @@ PluginComponent {
             spacing: Theme.spacingXS
 
             DIcon {
+                visible: root.liveChannels.length === 0
                 name: "live_tv"
                 size: root.iconSize
-                color: root.liveChannels.length > 0 ? Theme.primary : Theme.surfaceVariantText
+                color: Theme.surfaceVariantText
                 anchors.horizontalCenter: parent.horizontalCenter
             }
 
             StyledText {
-                text: root.loaded ? String(root.liveChannels.length) : "–"
+                visible: root.liveChannels.length === 0
+                text: root.loaded ? "0" : "–"
                 font.pixelSize: root.textSize
                 color: root.hasError ? Theme.error : Theme.surfaceText
                 anchors.horizontalCenter: parent.horizontalCenter
+            }
+
+            Repeater {
+                model: root.liveChannels
+
+                delegate: DCircularImage {
+                    required property var modelData
+
+                    width: root.barAvatarSize
+                    height: root.barAvatarSize
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    imageSource: modelData.avatar ?? ""
+                    fallbackText: (modelData.name ?? "?").charAt(0).toUpperCase()
+                    ringWidth: 0
+                }
             }
         }
     }

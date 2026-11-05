@@ -10,7 +10,7 @@ Personal [DMS](https://github.com/dangass/dms) plugins for Hyprland and niri.
 - **HyprlandWorkspaces** — rainbow Hyprland workspace switcher with named workspaces and scratchpads
 - **CatppuccinWorkspaces** — Catppuccin Mocha workspace indicator for niri (disabled)
 - **Quick AI** — type `?` for quick questions, translation, and input or clipboard summaries
-- **Twitch Follows** — bar count of live followed Twitch channels; click one to open it in mpv with its chat in Chatterino, or add it to an open group that shares one chat window; a search field finds live channels you don't follow
+- **Twitch Follows** — bar avatars of every followed Twitch channel that is live, biggest stream first; click one to open it in mpv with its chat in Chatterino, or add it to an open group that shares one chat window; a search field finds live channels you don't follow
 
 ## Twitch Follows setup
 
