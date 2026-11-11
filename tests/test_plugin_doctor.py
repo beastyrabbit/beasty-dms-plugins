@@ -7,10 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 
-from plugin_doctor import (  # noqa: E402
+from plugin_doctor import (
     Plugin,
     deployment_errors,
     parse_inventory,

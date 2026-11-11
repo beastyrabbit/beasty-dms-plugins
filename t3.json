@@ -1,0 +1,25 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "scripts": [
+    {
+      "name": "Test Python",
+      "command": "python3 -m unittest discover -s tests -v",
+      "icon": "test"
+    },
+    {
+      "name": "Check Python",
+      "command": "ruff check QuickAI TwitchFollows scripts tests && ruff format --check QuickAI TwitchFollows scripts tests",
+      "icon": "lint"
+    },
+    {
+      "name": "Check plugin inventory",
+      "command": "python3 scripts/plugin_doctor.py --repo-only",
+      "icon": "test"
+    },
+    {
+      "name": "Test QML",
+      "command": "QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/tst_quick_ai_launcher.qml",
+      "icon": "test"
+    }
+  ]
+}

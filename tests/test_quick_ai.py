@@ -345,14 +345,12 @@ class ModelSelectionTests(unittest.TestCase):
 
 class ArgumentTests(unittest.TestCase):
     def test_blank_query_is_rejected(self) -> None:
-        with redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                quick_ai.parse_args(["--mode", "ask", "--query", "   "])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            quick_ai.parse_args(["--mode", "ask", "--query", "   "])
 
     def test_translation_limit_is_rejected(self) -> None:
-        with redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                quick_ai.parse_args(["--mode", "translate", "--query", "x" * 1201])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            quick_ai.parse_args(["--mode", "translate", "--query", "x" * 1201])
 
     def test_clipboard_summary_does_not_require_query(self) -> None:
         args = quick_ai.parse_args(["--mode", "summarize", "--clipboard"])
@@ -369,14 +367,12 @@ class ArgumentTests(unittest.TestCase):
             quick_ai.parse_args(["--mode", "ask", "--stdin", "--query", "x"])
 
     def test_clipboard_is_rejected_for_ask(self) -> None:
-        with redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                quick_ai.parse_args(["--mode", "ask", "--clipboard"])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            quick_ai.parse_args(["--mode", "ask", "--clipboard"])
 
     def test_summary_limit_is_rejected(self) -> None:
-        with redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                quick_ai.parse_args(["--mode", "summarize", "--query", "x" * 24001])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            quick_ai.parse_args(["--mode", "summarize", "--query", "x" * 24001])
 
 
 class ClipboardTests(unittest.TestCase):
