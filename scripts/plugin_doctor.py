@@ -8,13 +8,12 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable
 from typing import Any
 
 import jsonschema
-
 
 INVENTORY_NAME = "plugins.json"
 LEGACY_SHELL_DIR = Path("/usr/share/quickshell/dms")
@@ -56,7 +55,8 @@ def parse_inventory(raw: str) -> list[Plugin]:
     seen_ids: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict):
-            raise ValueError("every plugins.json entry must be an object")
+            # Callers report ValueError as a broken inventory.
+            raise ValueError("every plugins.json entry must be an object")  # noqa: TRY004
         directory = entry.get("directory")
         plugin_id = entry.get("id")
         if (
