@@ -1246,6 +1246,7 @@ def play(
         "--cache=yes",
         f"--demuxer-max-back-bytes={REWIND_BUFFER}",
         f"--script={Path(__file__).with_name('twitch_buttons.lua')}",
+        f"--script={Path(__file__).with_name('twitch_audio.lua')}",
     ]
     # Without a Chatterino, mpv is the only place for chat. The chat relay
     # always runs, because it also handles `End` (jump to live).
