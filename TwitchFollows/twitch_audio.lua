@@ -102,15 +102,15 @@ local function tick()
 			loudness = loudness + (short_term - loudness) * TICK_SECONDS / LOUDNESS_SECONDS
 		end
 	end
-	if loudness == nil then
-		return
+	if loudness ~= nil then
+		local wanted = math.max(-MAX_GAIN_DB, math.min(MAX_GAIN_DB, TARGET_LUFS - loudness))
+		local step = wanted < gain_db and FALL_DB_PER_SECOND or RISE_DB_PER_SECOND
+		step = step * TICK_SECONDS
+		gain_db = gain_db + math.max(-step, math.min(step, wanted - gain_db))
 	end
-	local wanted = math.max(-MAX_GAIN_DB, math.min(MAX_GAIN_DB, TARGET_LUFS - loudness))
-	local step = wanted < gain_db and FALL_DB_PER_SECOND or RISE_DB_PER_SECOND
-	step = step * TICK_SECONDS
-	gain_db = gain_db + math.max(-step, math.min(step, wanted - gain_db))
-	-- Sent every tick: mpv rebuilds the filters when the audio format
-	-- changes, which puts the volume back to where the profile started it.
+	-- Sent every tick, also while a new channel is still being measured: mpv
+	-- rebuilds the filters on loadfile and when the audio format changes,
+	-- which puts the volume back to where the profile started it.
 	mp.command_native({ "af-command", LABEL, "volume", string.format("%.2fdB", gain_db), "volume" })
 end
 
