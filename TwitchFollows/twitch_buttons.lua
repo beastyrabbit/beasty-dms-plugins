@@ -3,10 +3,10 @@
 -- so a uosc button bound to user-data never matches its own values. Bound to
 -- `name@twitch_buttons` instead, uosc sends clicks here as `set <name> <value>`
 -- and shows whatever value this script reports back. The values themselves
--- live in user-data/<name>, where twitch_follows.py and chat_overlay.py read
--- and write them.
+-- live in user-data/<name>, where twitch_follows.py, chat_overlay.py and
+-- twitch_audio.lua read and write them.
 
-local names = { "twitch-chat-visible", "twitch-max-quality", "twitch-audio-only" }
+local names = { "twitch-chat-visible", "twitch-max-quality", "twitch-audio-only", "twitch-audio-profile" }
 local known = {}
 
 for _, name in ipairs(names) do
