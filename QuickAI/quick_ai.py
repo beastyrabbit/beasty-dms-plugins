@@ -487,16 +487,23 @@ def check_installation() -> dict[str, Any]:
     request = urllib.request.Request(
         openrouter_base() + "/key", headers={"Authorization": f"Bearer {token}"}
     )
+    # DMS runs this once at startup and never retries, so only a missing or
+    # rejected key blocks activation. DMS often starts before the network is
+    # up; requests report an unreachable OpenRouter on their own.
     try:
         urllib.request.urlopen(request, timeout=8).close()
     except urllib.error.HTTPError as error:
         error.close()
+        if error.code >= 500:
+            return {"ok": True, "unverified": True}
         return {
             "ok": False,
             "message": f"OpenRouter rejected {OPENROUTER_KEY_ENV} (HTTP {error.code}).",
         }
-    except (OSError, ValueError):
-        return {"ok": False, "message": "Could not reach OpenRouter."}
+    except ValueError:
+        return {"ok": False, "message": "The OpenRouter URL is invalid."}
+    except OSError:
+        return {"ok": True, "unverified": True}
     return {"ok": True}
 
 
