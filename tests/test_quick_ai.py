@@ -307,6 +307,23 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("HTTP 401", result["message"])
 
+    @patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-test-key"})
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_check_passes_while_offline(self, urlopen) -> None:
+        # DMS starts before the boot network; a failed check never retries.
+        urlopen.side_effect = urllib.error.URLError("Name or service not known")
+        self.assertEqual(
+            quick_ai.check_installation(), {"ok": True, "unverified": True}
+        )
+        urlopen.side_effect = TimeoutError()
+        self.assertTrue(quick_ai.check_installation()["ok"])
+
+    @patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-test-key"})
+    @patch.object(quick_ai.urllib.request, "urlopen")
+    def test_check_passes_during_openrouter_outage(self, urlopen) -> None:
+        urlopen.side_effect = http_error(503)
+        self.assertTrue(quick_ai.check_installation()["ok"])
+
     def test_check_reports_missing_key(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             result = quick_ai.check_installation()

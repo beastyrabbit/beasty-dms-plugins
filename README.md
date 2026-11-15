@@ -28,7 +28,7 @@ When a channel you watch raids another, the raided channel takes over its window
 
 ## Quick AI setup
 
-Quick AI calls OpenRouter directly and needs `OPENROUTER_API_KEY` in the DMS environment (for example from `~/.config/environment.d/`). The startup check confirms that OpenRouter accepts the key. The **Better answer** button reruns the request on `gpt-6.1-sol` with medium thinking through the CLIProxyAPI provider configured as `model_provider` in `~/.codex/config.toml`, using that provider's bearer token. It requires DMS 1.5 or newer.
+Quick AI calls OpenRouter directly and needs `OPENROUTER_API_KEY` in the DMS environment (for example from `~/.config/environment.d/`). The startup check blocks the plugin only when the key is missing or OpenRouter rejects it; if OpenRouter is unreachable at startup (for example before the boot network is up), the plugin loads anyway and requests report the connection error. The **Better answer** button reruns the request on `gpt-6.1-sol` with medium thinking through the CLIProxyAPI provider configured as `model_provider` in `~/.codex/config.toml`, using that provider's bearer token. It requires DMS 1.5 or newer.
 
 ```bash
 dms ipc call plugin-scan scan
