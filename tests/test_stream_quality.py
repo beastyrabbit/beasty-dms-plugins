@@ -233,6 +233,182 @@ class SegmenterTests(unittest.TestCase):
         self.assertEqual(segmenter.feed(b"video"), [])
         self.assertEqual(segmenter.flush(), b"video")
 
+    def test_bytes_out_of_step_after_a_segment_start_keep_their_order(self) -> None:
+        # A PAT with no timestamp after it, then bytes that aren't packets:
+        # they used to overtake the held PAT.
+        stream = segment(10, b"a") + ts_packet(0, start=True) + b"\x00junk" * 40
+        stream += segment(12, b"b")
+        segmenter = stream_quality.Segmenter()
+        pieces = segmenter.feed(stream)
+        joined = b"".join(p for _, p in pieces) + segmenter.flush()
+        self.assertEqual(joined, stream)
+
+
+def box(kind: bytes, *payload: bytes) -> bytes:
+    data = b"".join(payload)
+    return (8 + len(data)).to_bytes(4, "big") + kind + data
+
+
+def full_box(kind: bytes, flags: int, *payload: bytes) -> bytes:
+    return box(kind, flags.to_bytes(4, "big"), *payload)
+
+
+def u32(*values: int) -> bytes:
+    return b"".join(value.to_bytes(4, "big") for value in values)
+
+
+AUDIO_TRACK, VIDEO_TRACK = 1, 2
+AUDIO_SCALE, VIDEO_SCALE = 48000, 1000000
+
+
+def trak(track_id: int, handler: bytes, timescale: int, entry: bytes) -> bytes:
+    return box(
+        b"trak",
+        full_box(b"tkhd", 3, u32(0, 0, track_id), bytes(72)),
+        box(
+            b"mdia",
+            full_box(b"mdhd", 0, u32(0, 0, timescale, 0), bytes(4)),
+            full_box(b"hdlr", 0, u32(0), handler, bytes(13)),
+            box(b"minf", box(b"stbl", full_box(b"stsd", 0, u32(1), entry))),
+        ),
+    )
+
+
+def mp4_header(video: bool = True) -> bytes:
+    """ftyp and moov as Twitch sends them: audio track 1, video track 2."""
+    tracks = trak(AUDIO_TRACK, b"soun", AUDIO_SCALE, box(b"mp4a", bytes(28)))
+    trex = full_box(b"trex", 0, u32(AUDIO_TRACK, 1, 1024, 0, 0x02800000))
+    if video:
+        avcc = box(b"avcC", bytes([1, 0x4D, 0x40, 0x2A, 0xFF]))
+        tracks += trak(VIDEO_TRACK, b"vide", VIDEO_SCALE, box(b"avc1", bytes(78), avcc))
+        trex += full_box(b"trex", 0, u32(VIDEO_TRACK, 1, 33333, 0, 0x02400000))
+    moov = box(b"moov", full_box(b"mvhd", 0, bytes(96)), tracks, box(b"mvex", trex))
+    return box(b"ftyp", b"iso5", u32(0)) + moov
+
+
+def nal(header: int, body: bytes = b"") -> bytes:
+    return (1 + len(body)).to_bytes(4, "big") + bytes([header]) + body
+
+
+def traf(track_id: int, decode_time: int, offset: int, size: int, flags: int) -> bytes:
+    return box(
+        b"traf",
+        full_box(b"tfhd", 0x20000, u32(track_id)),
+        full_box(b"tfdt", 1 << 24, decode_time.to_bytes(8, "big")),
+        # Data offset, then each sample's size and flags.
+        full_box(b"trun", 0x601, u32(1, offset, size, flags)),
+    )
+
+
+def fragment(
+    seconds: float,
+    key: bool = True,
+    settings: bool = True,
+    video: bool = True,
+    mark: bytes = b"A",
+) -> bytes:
+    """One moof and its mdat; audio comes first, as from Twitch. The mdat
+    holds bytes that look like a transport stream's PAT."""
+    audio = b"\x47\x40\x00" + mark * 20
+    picture = nal(0x65 if key else 0x41, b"\x47\x40\x00picture")
+    if key and settings:
+        picture = nal(0x67, b"sps") + nal(0x68, b"pps") + picture
+    flags = 0x02000000 if key else 0x01010000
+    audio_time = round(seconds * AUDIO_SCALE)
+    video_time = round(seconds * VIDEO_SCALE)
+
+    def moof(audio_offset: int, video_offset: int) -> bytes:
+        trafs = traf(AUDIO_TRACK, audio_time, audio_offset, len(audio), 0x02800000)
+        if video:
+            trafs += traf(VIDEO_TRACK, video_time, video_offset, len(picture), flags)
+        return box(b"moof", full_box(b"mfhd", 0, u32(1)), trafs)
+
+    size = len(moof(0, 0))
+    mdat = box(b"mdat", audio, picture if video else b"")
+    return moof(size + 8, size + 8 + len(audio)) + mdat
+
+
+def segment_starts(stream: bytes, size: int) -> tuple[bytes, list[float]]:
+    segmenter = stream_quality.Segmenter()
+    pieces = []
+    for start in range(0, len(stream), size):
+        pieces += segmenter.feed(stream[start : start + size])
+    joined = b"".join(p for _, p in pieces) + segmenter.flush()
+    return joined, [round(t, 3) for t, _ in pieces if t is not None]
+
+
+class Mp4SegmenterTests(unittest.TestCase):
+    def test_cuts_at_keyframes_whatever_the_chunk_size(self) -> None:
+        stream = mp4_header() + fragment(10) + fragment(10.1, key=False)
+        stream += fragment(12) + fragment(12.1, key=False)
+        for size in (len(stream), 188, 100, 7, 1):
+            joined, starts = segment_starts(stream, size)
+            self.assertEqual(joined, stream, size)
+            self.assertEqual(starts, [10, 12], size)
+
+    def test_a_keyframe_without_its_picture_settings_is_no_start(self) -> None:
+        stream = mp4_header() + fragment(10, settings=False) + fragment(12)
+        joined, starts = segment_starts(stream, 50)
+        self.assertEqual(joined, stream)
+        self.assertEqual(starts, [12])
+
+    def test_audio_alone_starts_at_every_fragment(self) -> None:
+        stream = mp4_header(video=False)
+        stream += b"".join(fragment(10 + i / 10, video=False) for i in range(3))
+        joined, starts = segment_starts(stream, 64)
+        self.assertEqual(joined, stream)
+        self.assertEqual(starts, [10, 10.1, 10.2])
+
+    def test_data_that_stops_making_sense_still_passes_through(self) -> None:
+        stream = mp4_header() + fragment(10) + u32(3) + b"moof" + fragment(12)
+        joined, starts = segment_starts(stream, 100)
+        self.assertEqual(joined, stream)
+        self.assertEqual(starts, [10])
+
+    def test_an_hevc_keyframe_needs_both_vps_and_sps(self) -> None:
+        def start(*nals: bytes) -> bool | None:
+            data = bytearray(b"".join(nals))
+            return stream_quality.HeldStart(10, data, 0, len(data), 4, b"hevc").decide()
+
+        vps, sps, pps = nal(32 << 1, b"v"), nal(33 << 1, b"s"), nal(34 << 1, b"p")
+        picture = nal(19 << 1, b"idr")
+        self.assertTrue(start(vps, sps, pps, picture))
+        self.assertFalse(start(sps, pps, picture))
+        self.assertFalse(start(vps, pps, picture))
+
+    def test_a_different_nal_length_size_cant_follow(self) -> None:
+        track = stream_quality.Track(b"vide", VIDEO_SCALE, b"avc1", length_size=4)
+        other = stream_quality.Track(b"vide", VIDEO_SCALE, b"avc3", length_size=2)
+        self.assertFalse(other.matches(track))
+        other.length_size = 4
+        self.assertTrue(other.matches(track))
+
+    def test_different_sample_defaults_cant_follow(self) -> None:
+        # The new header's defaults never reach mpv, which keeps the first.
+        track = stream_quality.Track(b"vide", VIDEO_SCALE, b"avc1", 4, 33333, 17)
+        other = stream_quality.Track(b"vide", VIDEO_SCALE, b"avc1", 4, 33333, 35)
+        self.assertFalse(other.matches(track))
+        other.default_size = 17
+        self.assertTrue(other.matches(track))
+        other.default_duration = 16667
+        self.assertFalse(other.matches(track))
+
+    def test_tells_which_streams_can_follow_which(self) -> None:
+        def fed(data: bytes) -> stream_quality.Segmenter:
+            segmenter = stream_quality.Segmenter()
+            segmenter.feed(data)
+            return segmenter
+
+        video, audio = fed(mp4_header()), fed(mp4_header(video=False))
+        ts = fed(segment(10, b"a"))
+        self.assertTrue(audio.splices_into(video))
+        self.assertTrue(video.splices_into(video))
+        # mpv knows no video track when the stream started as audio only.
+        self.assertFalse(video.splices_into(audio))
+        self.assertFalse(video.splices_into(ts))
+        self.assertIsNone(video.splices_into(stream_quality.Segmenter()))
+        self.assertTrue(ts.splices_into(stream_quality.Segmenter()))
+
 
 class Collector:
     """Stands in for mpv's stdin."""
@@ -395,6 +571,58 @@ class RelayTests(unittest.TestCase):
         old_in.close()
         new_in.close()
 
+    def test_splices_mp4_without_the_new_renditions_header(self) -> None:
+        old, old_in = self.pipe_source("1080p60")
+        new, new_in = self.pipe_source("480p30")
+        output = Collector()
+        relay = stream_quality.Relay(output, old)
+        relay.start()
+        before = mp4_header() + fragment(10) + fragment(10.1, key=False)
+        old_in.write(before)
+        wait_until(lambda: output.data == before)
+        relay.offer(new)
+        after = fragment(12, mark=b"B") + fragment(12.1, key=False, mark=b"B")
+        new_in.write(mp4_header() + after)
+        wait_until(lambda: len(relay.segments) == 1)
+        old_in.write(fragment(12) + fragment(12.1, key=False))
+        wait_until(lambda: relay.spliced is not None)
+        wait_until(lambda: output.data == before + after)
+        old_in.close()
+        new_in.close()
+
+    def test_video_cant_follow_an_mp4_stream_that_started_as_audio(self) -> None:
+        old, old_in = self.pipe_source("audio_only")
+        new, new_in = self.pipe_source("1080p60")
+        relay = stream_quality.Relay(Collector(), old)
+        relay.start()
+        old_in.write(mp4_header(video=False) + fragment(10, video=False))
+        wait_until(lambda: relay.header_source.splices_into(relay.header_source))
+        relay.offer(new)
+        new_in.write(mp4_header() + fragment(12))
+        wait_until(lambda: relay.pending_unusable)
+        self.assertEqual(relay.segments, [])
+        old_in.close()
+        new_in.close()
+
+    def test_switches_to_mp4_audio_at_the_nearest_fragment(self) -> None:
+        old, _ = self.pipe_source("1080p60")
+        new, _ = self.pipe_source("audio_only")
+        relay = stream_quality.Relay(Collector(), old)
+        relay.offer(new)
+        relay.hold([(11.92, b"a"), (12.03, b"b"), (16.1, b"c")])
+        relay.queue = [(12.0, b"old")]
+        self.assertEqual(relay.advance(0), [b"b", b"c"])
+
+    def test_switches_from_mp4_audio_at_its_nearest_fragment(self) -> None:
+        old, _ = self.pipe_source("audio_only")
+        new, _ = self.pipe_source("1080p60")
+        relay = stream_quality.Relay(Collector(), old)
+        relay.offer(new)
+        relay.release()
+        relay.hold([(12.0, b"new")])
+        relay.queue = [(11.92, b"x"), (12.03, b"y")]
+        self.assertEqual(relay.advance(0), [b"x", b"new"])
+
     def test_a_spliced_source_can_no_longer_be_withdrawn(self) -> None:
         old, _ = self.pipe_source("1080p60")
         new, _ = self.pipe_source("480p30")
@@ -506,6 +734,7 @@ class SwitcherTests(unittest.TestCase):
         self.relay.take_spliced.return_value = None
         self.relay.awaiting_release = False
         self.relay.released = False
+        self.relay.pending_unusable = False
         policy = stream_quality.QualityPolicy(BEST, audio_only=False)
         self.switcher = stream_quality.Switcher(
             "streamlink", "big", self.dir / "mpv.sock", policy, self.relay
@@ -624,6 +853,19 @@ class SwitcherTests(unittest.TestCase):
         self.assertEqual(len(self.started), 1)
         self.switcher.update(2 + stream_quality.RETRY_SECONDS)
         self.assertEqual(len(self.started), 2)
+
+    def test_a_rendition_that_cant_follow_is_not_tried_again(self) -> None:
+        self.switcher.policy.set_audio(True)
+        self.switcher.update(1)
+        self.relay.pending_unusable = True
+        self.switcher.update(2)
+        self.relay.withdraw.assert_called_once()
+        self.assertIsNone(self.switcher.pending)
+        message = ["show-text", "This stream can't switch to Audio only", 4000]
+        self.assertIn(message, self.sent())
+        self.relay.pending_unusable = False
+        self.switcher.update(3 + 2 * stream_quality.RETRY_SECONDS)
+        self.assertEqual(len(self.started), 1)
 
     def test_video_after_audio_waits_past_the_timeout_for_mpv_to_catch_up(
         self,

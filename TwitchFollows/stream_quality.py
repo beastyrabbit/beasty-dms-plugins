@@ -6,11 +6,18 @@ quality drops a step when the stream buffers and climbs back once it has played
 smoothly for a while. "Audio only" plays Twitch's audio rendition instead and
 keeps a still of the last picture on screen.
 
-mpv reads one continuous transport stream from the relay here. streamlink
-can't change renditions within a stream, so a switch starts a second streamlink
-for the new rendition in the background and splices it in at a segment
-boundary. Twitch's renditions share their timestamps and 2-second segment
-boundaries, so mpv plays on without reloading and keeps its rewind buffer.
+mpv reads one continuous stream from the relay here. streamlink can't change
+renditions within a stream, so a switch starts a second streamlink for the new
+rendition in the background and splices it in at a segment boundary. Twitch's
+renditions share their timestamps and 2-second segment boundaries, so mpv
+plays on without reloading and keeps its rewind buffer.
+
+Most channels come as a transport stream. Channels on Twitch's Enhanced
+Broadcasting come as fragmented MP4 instead: one header (ftyp and moov) that
+mpv reads once, then fragments (moof and mdat). A splice there sends the new
+rendition's fragments from a keyframe on, without its header: the renditions
+share their track IDs and timescales, and each keyframe carries its picture
+settings (SPS and PPS), so mpv's decoder follows the new size.
 """
 
 from __future__ import annotations
@@ -106,13 +113,67 @@ def pes_timestamp(packet: bytes) -> float | None:
     return ticks / 90000
 
 
+Piece = tuple[float | None, bytes]
+
+
 class Segmenter:
-    """Cuts a transport stream into Twitch's segments as it arrives.
+    """Cuts a stream into Twitch's segments as it arrives, in whichever format
+    streamlink writes: a transport stream, or fragmented MP4.
+
+    `feed` returns pieces of the stream in order, as (timestamp, bytes): the
+    timestamp is set on a piece that starts a segment and None on the rest.
+    Joined, the pieces are always exactly the bytes fed in.
+    """
+
+    def __init__(self) -> None:
+        self.format: str | None = None
+        self.inner: TsSegmenter | Mp4Segmenter | None = None
+        self.head = b""
+
+    def feed(self, data: bytes) -> list[Piece]:
+        if self.inner is None:
+            self.head += data
+            if len(self.head) < 8:
+                return []
+            data, self.head = self.head, b""
+            if data[4:8] == b"ftyp":
+                self.format, self.inner = "mp4", Mp4Segmenter()
+            else:
+                self.format, self.inner = "ts", TsSegmenter()
+        return self.inner.feed(data)
+
+    def flush(self) -> bytes:
+        """What is still held back once the stream has ended."""
+        if self.inner is None:
+            head, self.head = self.head, b""
+            return head
+        return self.inner.flush()
+
+    def splices_into(self, output: Segmenter) -> bool | None:
+        """Whether this stream's segments can follow what mpv got from
+        `output`; None until both have shown enough to tell."""
+        if self.format == "ts" and output.format in (None, "ts"):
+            return True  # each segment brings all mpv needs
+        if self.format is None or output.format is None:
+            return None
+        if self.format != output.format:
+            return False
+        tracks = self.inner.tracks
+        known = output.inner.tracks
+        if tracks is None or known is None:
+            return None
+        # mpv read the first header only: it knows only those tracks.
+        return all(
+            number in known and track.matches(known[number])
+            for number, track in tracks.items()
+        )
+
+
+class TsSegmenter:
+    """Cuts a transport stream into Twitch's segments.
 
     Each segment starts with a PAT; its start time is the timestamp of the
-    first PES packet after it. `feed` returns pieces of the stream in order, as
-    (timestamp, bytes): the timestamp is set on a piece that starts a segment
-    and None on the rest.
+    first PES packet after it.
     """
 
     # A segment start whose timestamp doesn't follow this soon is passed on as is.
@@ -122,52 +183,469 @@ class Segmenter:
         self.rest = b""
         self.held: bytearray | None = None
 
-    def feed(self, data: bytes) -> list[tuple[float | None, bytes]]:
+    def feed(self, data: bytes) -> list[Piece]:
         data = self.rest + data
-        pieces: list[tuple[float | None, bytes]] = []
+        pieces: list[Piece] = []
         run = bytearray()
         position = 0
         while len(data) - position >= PACKET_SIZE:
             if data[position] != SYNC_BYTE:
-                # Out of step (not expected from streamlink): pass bytes on
-                # until the next sync byte.
-                found = data.find(bytes([SYNC_BYTE]), position + 1)
-                stop = found if found >= 0 else len(data)
-                run += data[position:stop]
-                position = stop
+                position = self.skip_to_sync(data, position, run)
                 continue
             packet = data[position : position + PACKET_SIZE]
             position += PACKET_SIZE
-            pid = (packet[1] & 0x1F) << 8 | packet[2]
-            if pid == 0 and packet[1] & 0x40:
-                if run:
-                    pieces.append((None, bytes(run)))
-                    run = bytearray()
-                if self.held:
-                    pieces.append((None, bytes(self.held)))
-                self.held = bytearray(packet)
-                continue
-            if self.held is None:
-                run += packet
-                continue
-            self.held += packet
-            timestamp = pes_timestamp(packet)
-            if timestamp is not None:
-                pieces.append((timestamp, bytes(self.held)))
-                self.held = None
-            elif len(self.held) >= self.MAX_HELD_PACKETS * PACKET_SIZE:
-                pieces.append((None, bytes(self.held)))
-                self.held = None
+            run = self.take_packet(packet, pieces, run)
         self.rest = data[position:]
         if run:
             pieces.append((None, bytes(run)))
         return pieces
+
+    def skip_to_sync(self, data: bytes, position: int, run: bytearray) -> int:
+        """Out of step (not expected from streamlink): passes bytes on until
+        the next sync byte, after any held segment start so that the order
+        stays. Returns where that sync byte is."""
+        if self.held is not None:
+            run.extend(self.held)
+            self.held = None
+        found = data.find(bytes([SYNC_BYTE]), position + 1)
+        stop = found if found >= 0 else len(data)
+        run.extend(data[position:stop])
+        return stop
+
+    def take_packet(
+        self, packet: bytes, pieces: list[Piece], run: bytearray
+    ) -> bytearray:
+        """Adds one packet to the run, the held segment start or a new one;
+        returns the run to go on with."""
+        pid = (packet[1] & 0x1F) << 8 | packet[2]
+        if pid == 0 and packet[1] & 0x40:
+            if run:
+                pieces.append((None, bytes(run)))
+                run = bytearray()
+            if self.held:
+                pieces.append((None, bytes(self.held)))
+            self.held = bytearray(packet)
+            return run
+        if self.held is None:
+            run.extend(packet)
+            return run
+        self.held += packet
+        timestamp = pes_timestamp(packet)
+        if (
+            timestamp is not None
+            or len(self.held) >= self.MAX_HELD_PACKETS * PACKET_SIZE
+        ):
+            pieces.append((timestamp, bytes(self.held)))
+            self.held = None
+        return run
 
     def flush(self) -> bytes:
         """What is still held back once the stream has ended."""
         rest = bytes(self.held or b"") + self.rest
         self.held, self.rest = None, b""
         return rest
+
+
+# Video codecs whose keyframes can bring their own picture settings, and the
+# NAL unit types of those settings (H.264's SPS; H.265's VPS and SPS).
+CODEC_FAMILIES = {b"avc1": b"avc", b"avc3": b"avc", b"hvc1": b"hevc", b"hev1": b"hevc"}
+PARAMETER_SETS = {b"avc": {7}, b"hevc": {32, 33}}
+# The MP4 boxes read whole; everything else passes through as it arrives.
+PARSED_BOXES = {b"moov", b"moof"}
+MAX_PARSED_BYTES = 16 << 20
+# How far into a keyframe a segment start may look for its picture settings.
+MAX_PROBE_BYTES = 1 << 20
+NON_SYNC_SAMPLE = 0x10000
+
+
+def box_header(data: bytes, offset: int, end: int) -> tuple[int, bytes, int] | None:
+    """(size, type, header length) of the box at `offset`; None while its
+    header isn't all there."""
+    if end - offset < 8:
+        return None
+    size = int.from_bytes(data[offset : offset + 4], "big")
+    kind = bytes(data[offset + 4 : offset + 8])
+    if size != 1:
+        return size, kind, 8
+    if end - offset < 16:
+        return None
+    return int.from_bytes(data[offset + 8 : offset + 16], "big"), kind, 16
+
+
+def child_boxes(data: bytes, start: int, end: int):
+    """(type, payload start, end) of each box within data[start:end]."""
+    while header := box_header(data, start, end):
+        size, kind, header_length = header
+        if size < header_length or start + size > end:
+            return
+        yield kind, start + header_length, start + size
+        start += size
+
+
+def find_box(data: bytes, start: int, end: int, *path: bytes) -> tuple[int, int]:
+    """The payload span of the box at `path` below data[start:end]; (0, 0) if
+    it isn't there."""
+    for kind in path:
+        found = next((b for b in child_boxes(data, start, end) if b[0] == kind), None)
+        if found is None:
+            return 0, 0
+        _, start, end = found
+    return start, end
+
+
+def number(data: bytes, offset: int, size: int = 4) -> int:
+    return int.from_bytes(data[offset : offset + size], "big")
+
+
+@dataclass
+class Track:
+    """What mpv needs to play a track's fragments, from an MP4 header."""
+
+    handler: bytes
+    timescale: int
+    codec: bytes
+    # Bytes in front of each NAL unit, for H.264 and H.265.
+    length_size: int = 0
+    # The sample defaults (trex) fragments fall back on.
+    default_duration: int = 0
+    default_size: int = 0
+    default_flags: int = 0
+
+    @property
+    def family(self) -> bytes:
+        return CODEC_FAMILIES.get(self.codec, self.codec)
+
+    def matches(self, other: Track) -> bool:
+        # mpv reads every fragment with the first header: its NAL length size
+        # and its sample defaults.
+        return self.key() == other.key()
+
+    def key(self) -> tuple:
+        return (
+            self.handler,
+            self.timescale,
+            self.family,
+            self.length_size,
+            self.default_duration,
+            self.default_size,
+            self.default_flags,
+        )
+
+
+def parse_moov(box: bytes) -> dict[int, Track]:
+    """The tracks of an MP4 header, by track ID."""
+    tracks: dict[int, Track] = {}
+    _, start, end = next(iter(child_boxes(box, 0, len(box))))
+    for kind, s, e in child_boxes(box, start, end):
+        if kind == b"trak":
+            track_id, track = parse_trak(box, s, e)
+            if track_id:
+                tracks[track_id] = track
+    for kind, s, e in child_boxes(box, *find_box(box, start, end, b"mvex")):
+        if kind == b"trex" and e - s >= 24 and number(box, s + 4) in tracks:
+            track = tracks[number(box, s + 4)]
+            track.default_duration = number(box, s + 12)
+            track.default_size = number(box, s + 16)
+            track.default_flags = number(box, s + 20)
+    return tracks
+
+
+def header_field(box: bytes, span: tuple[int, int]) -> int:
+    """The track ID of a tkhd or the timescale of an mdhd, which sit after
+    the times, 4 or 8 bytes each by the box's version; 0 if it is too short."""
+    start, end = span
+    if end - start < 24:
+        return 0
+    return number(box, start + 20) if box[start] == 1 else number(box, start + 12)
+
+
+def nal_length_size(box: bytes, entry: tuple[bytes, int, int], family: bytes) -> int:
+    """Bytes in front of each NAL unit, from a sample entry's configuration
+    box, which follows the 78 bytes of a visual sample entry."""
+    config, at = (b"avcC", 4) if family == b"avc" else (b"hvcC", 21)
+    s, e = find_box(box, entry[1] + 78, entry[2], config)
+    return (box[s + at] & 3) + 1 if e - s > at else 0
+
+
+def parse_trak(box: bytes, start: int, end: int) -> tuple[int, Track]:
+    track_id = header_field(box, find_box(box, start, end, b"tkhd"))
+    timescale = header_field(box, find_box(box, start, end, b"mdia", b"mdhd"))
+    s, e = find_box(box, start, end, b"mdia", b"hdlr")
+    handler = bytes(box[s + 8 : s + 12]) if e - s >= 12 else b""
+    s, e = find_box(box, start, end, b"mdia", b"minf", b"stbl", b"stsd")
+    entry = next(iter(child_boxes(box, s + 8, e)), None) if e - s >= 8 else None
+    track = Track(handler, timescale, entry[0] if entry else b"")
+    if entry and track.family in PARAMETER_SETS:
+        track.length_size = nal_length_size(box, entry, track.family)
+    return track_id, track
+
+
+@dataclass
+class Fragment:
+    """The part of a moof about one track."""
+
+    track_id: int
+    decode_time: int
+    # The first sample: whether it is a keyframe, and where its data starts,
+    # counted from the start of the moof (None if it can't be told).
+    sync: bool
+    offset: int | None
+    size: int
+
+
+def parse_moof(box: bytes, tracks: dict[int, Track]) -> dict[int, Fragment]:
+    fragments: dict[int, Fragment] = {}
+    _, start, end = next(iter(child_boxes(box, 0, len(box))))
+    for kind, s, e in child_boxes(box, start, end):
+        if kind != b"traf":
+            continue
+        fragment = parse_traf(box, s, e, tracks, first=not fragments)
+        if fragment:
+            fragments[fragment.track_id] = fragment
+    return fragments
+
+
+def parse_traf(
+    box: bytes, start: int, end: int, tracks: dict[int, Track], first: bool
+) -> Fragment | None:
+    s, e = find_box(box, start, end, b"tfhd")
+    if e - s < 8 or number(box, s + 4) not in tracks:
+        return None
+    track_id = number(box, s + 4)
+    flags, fields = parse_tfhd(box, s)
+    s, e = find_box(box, start, end, b"tfdt")
+    if e - s < 8:
+        return None
+    decode_time = number(box, s + 4, 8 if box[s] == 1 else 4)
+    s, e = find_box(box, start, end, b"trun")
+    if e - s < 8 or not number(box, s + 4):
+        return None
+    # The track's defaults, then the fragment's, then the run's own.
+    track = tracks[track_id]
+    sample = {
+        "flags": fields.get("flags", track.default_flags),
+        "size": fields.get("size", track.default_size),
+    }
+    offset = first_sample(box, s, sample)
+    # Offsets count from the moof only without a base offset, and past the
+    # first track only if the header says so.
+    if "base" in fields or not (flags & 0x20000 or first):
+        offset = None
+    sync = not sample["flags"] & NON_SYNC_SAMPLE
+    return Fragment(track_id, decode_time, sync, offset, sample["size"])
+
+
+def parse_tfhd(box: bytes, start: int) -> tuple[int, dict[str, int]]:
+    """A tfhd's flags and the optional fields they say are there."""
+    flags = number(box, start) & 0xFFFFFF
+    at = start + 8
+    fields = {}
+    for bit, name, size in (
+        (0x1, "base", 8),
+        (0x2, "description", 4),
+        (0x8, "duration", 4),
+        (0x10, "size", 4),
+        (0x20, "flags", 4),
+    ):
+        if flags & bit:
+            fields[name] = number(box, at, size)
+            at += size
+    return flags, fields
+
+
+def first_sample(box: bytes, start: int, sample: dict[str, int]) -> int | None:
+    """Reads a trun's first sample into `sample` (flags and size), and
+    returns the run's data offset, if it has one."""
+    run_flags = number(box, start) & 0xFFFFFF
+    at = start + 8
+    offset = None
+    if run_flags & 0x1:
+        offset = int.from_bytes(box[at : at + 4], "big", signed=True)
+        at += 4
+    if run_flags & 0x4:
+        sample["flags"] = number(box, at)
+        at += 4
+    at += 4 if run_flags & 0x100 else 0
+    if run_flags & 0x200:
+        sample["size"] = number(box, at)
+        at += 4
+    if run_flags & 0x400 and not run_flags & 0x4:
+        sample["flags"] = number(box, at)
+    return offset
+
+
+@dataclass
+class HeldStart:
+    """A keyframe's moof, held with the data that follows until it shows
+    whether the keyframe brings its picture settings."""
+
+    timestamp: float
+    data: bytearray
+    offset: int
+    size: int
+    length_size: int
+    family: bytes
+
+    def decide(self) -> bool | None:
+        """True if a new rendition can start here, False if not; None while
+        that can't be told yet."""
+        position = self.offset
+        end = self.offset + self.size if self.size else self.offset + MAX_PROBE_BYTES
+        missing = set(PARAMETER_SETS[self.family])
+        while position < end:
+            if position + self.length_size >= len(self.data):
+                return None if len(self.data) < self.offset + MAX_PROBE_BYTES else False
+            header = self.data[position + self.length_size]
+            if self.family == b"avc":
+                kind, picture = header & 0x1F, 1 <= header & 0x1F <= 5
+            else:
+                kind, picture = header >> 1 & 0x3F, header >> 1 & 0x3F < 32
+            missing.discard(kind)
+            if not missing:
+                return True
+            if picture:
+                return False
+            length = number(self.data, position, self.length_size)
+            position += self.length_size + length
+        return False
+
+
+class Mp4Segmenter:
+    """Cuts fragmented MP4 into segments, at the moofs a new rendition can
+    start from.
+
+    In a stream with video that is a moof whose video starts with a keyframe
+    that brings its picture settings; audio alone can start at any moof. The
+    start time is the audio's when the moof has audio (identical across
+    Twitch's renditions, video's differs by up to a frame), else the video's.
+    """
+
+    def __init__(self) -> None:
+        self.buffer = bytearray()
+        # Bytes of the box being passed through that are still to come.
+        self.skip = 0
+        # Set once the stream stops making sense: it then passes through.
+        self.broken = False
+        self.tracks: dict[int, Track] | None = None
+        self.held: HeldStart | None = None
+
+    def feed(self, data: bytes) -> list[Piece]:
+        pieces: list[Piece] = []
+        self.buffer += data
+        while self.buffer:
+            if self.broken:
+                self.emit(pieces, bytes(self.buffer))
+                self.buffer.clear()
+                break
+            if self.skip:
+                count = min(self.skip, len(self.buffer))
+                self.emit(pieces, bytes(self.buffer[:count]))
+                del self.buffer[:count]
+                self.skip -= count
+                continue
+            header = box_header(self.buffer, 0, len(self.buffer))
+            if header is None:
+                break
+            size, kind, header_length = header
+            if size < header_length or (
+                kind in PARSED_BOXES and size > MAX_PARSED_BYTES
+            ):
+                self.broken = True
+                continue
+            if kind not in PARSED_BOXES:
+                self.skip = size
+                continue
+            if len(self.buffer) < size:
+                break
+            box = bytes(self.buffer[:size])
+            del self.buffer[:size]
+            self.parsed(kind, box, pieces)
+        return merged(pieces)
+
+    def flush(self) -> bytes:
+        rest = bytes(self.held.data if self.held else b"") + bytes(self.buffer)
+        self.held, self.buffer = None, bytearray()
+        return rest
+
+    def emit(self, pieces: list[Piece], data: bytes) -> None:
+        if self.held is None:
+            pieces.append((None, data))
+            return
+        self.held.data += data
+        usable = self.held.decide()
+        if usable is not None:
+            pieces.append(
+                (self.held.timestamp if usable else None, bytes(self.held.data))
+            )
+            self.held = None
+
+    def parsed(self, kind: bytes, box: bytes, pieces: list[Piece]) -> None:
+        if self.held:
+            # The keyframe's data never came: not a start after all.
+            pieces.append((None, bytes(self.held.data)))
+            self.held = None
+        start = None
+        try:
+            if kind == b"moov":
+                self.tracks = parse_moov(box)
+            elif self.tracks:
+                start = self.segment_start(box)
+        except (IndexError, StopIteration, ValueError):
+            start = None
+        if start is None:
+            pieces.append((None, box))
+        elif isinstance(start, HeldStart):
+            self.held = start
+            self.emit(pieces, b"")
+        else:
+            pieces.append((start, box))
+
+    def segment_start(self, box: bytes) -> float | HeldStart | None:
+        tracks = self.tracks
+        video = next((n for n, t in tracks.items() if t.handler == b"vide"), None)
+        audio = next((n for n, t in tracks.items() if t.handler == b"soun"), None)
+        fragments = parse_moof(box, tracks)
+        timing = fragments.get(audio) or fragments.get(video)
+        if timing is None or not tracks[timing.track_id].timescale:
+            return None
+        timestamp = timing.decode_time / tracks[timing.track_id].timescale
+        if video is None:
+            return timestamp
+        fragment = fragments.get(video)
+        track = tracks[video]
+        if (
+            fragment is None
+            or not fragment.sync
+            or fragment.offset is None
+            or track.family not in PARAMETER_SETS
+            or not track.length_size
+        ):
+            return None
+        return HeldStart(
+            timestamp,
+            bytearray(box),
+            fragment.offset,
+            fragment.size,
+            track.length_size,
+            track.family,
+        )
+
+
+def merged(pieces: list[Piece]) -> list[Piece]:
+    """Joins the pieces that don't start a segment."""
+    out: list[Piece] = []
+    run: list[bytes] = []
+    for timestamp, piece in pieces:
+        if timestamp is None:
+            run.append(piece)
+            continue
+        if run:
+            out.append((None, b"".join(run)))
+            run = []
+        out.append((timestamp, piece))
+    if run:
+        out.append((None, b"".join(run)))
+    return [piece for piece in out if piece[1] or piece[0] is not None]
 
 
 class QualityPolicy:
@@ -382,6 +860,9 @@ class Relay:
         self.current = source
         self.pending: Source | None = None
         self.pending_ended = False
+        # Set when the pending source can't follow what mpv plays, such as
+        # video for an MP4 stream that started as audio only.
+        self.pending_unusable = False
         # The pending source's segments read so far, as [start, bytes], and
         # the latest start it has reached.
         self.segments: list[list] = []
@@ -393,6 +874,9 @@ class Relay:
         # The segment start the queue waits at, and since when.
         self.waiting: tuple[float, float] | None = None
         self.segmenters = {id(source): Segmenter()}
+        # What the first source sent mpv stays what mpv goes by: an MP4
+        # header comes only once.
+        self.header_source = self.segmenters[id(source)]
         # (new, old) once a splice has happened, until taken.
         self.spliced: tuple[Source, Source] | None = None
         self.lock = threading.Lock()
@@ -414,6 +898,7 @@ class Relay:
         with self.lock:
             self.pending = source
             self.pending_ended = False
+            self.pending_unusable = False
             self.segments = []
             self.pending_reached = None
             self.released = False
@@ -525,10 +1010,16 @@ class Relay:
         if segmenter is None:
             return []  # withdrawn meanwhile
         if source is self.pending:
-            if data:
-                self.hold(segmenter.feed(data))
-            else:
+            if not data:
                 self.pending_ended = True
+            elif not self.pending_unusable:
+                pieces = segmenter.feed(data)
+                usable = segmenter.splices_into(self.header_source)
+                if usable:
+                    self.hold(pieces)
+                elif usable is False:
+                    self.pending_unusable = True
+                    self.segments = []
         elif source is self.current:
             if not data:
                 self.source_ended = True
@@ -553,10 +1044,7 @@ class Relay:
         while self.queue:
             start, piece = self.queue[0]
             if start is not None and self.pending:
-                # Segments the current source has already passed can't be used.
-                self.segments = [
-                    s for s in self.segments if s[0] > start - SPLICE_TOLERANCE_SECONDS
-                ]
+                self.drop_passed_segments(start)
                 if self.has_segment(start):
                     if not self.ready(start):
                         return out
@@ -570,10 +1058,28 @@ class Relay:
             self.queue.pop(0)
         return out
 
+    def drop_passed_segments(self, start: float) -> None:
+        """Drops the pending segments the current source has already passed,
+        which can't be used. MP4 audio starts at every fragment, which the
+        renditions don't all cut alike: of those near this start, the nearest
+        stays first."""
+        self.segments = [
+            s for s in self.segments if s[0] > start - SPLICE_TOLERANCE_SECONDS
+        ]
+        while len(self.segments) > 1 and abs(self.segments[1][0] - start) < abs(
+            self.segments[0][0] - start
+        ):
+            self.segments.pop(0)
+
     def has_segment(self, start: float) -> bool:
-        return bool(self.segments) and (
-            abs(self.segments[0][0] - start) < SPLICE_TOLERANCE_SECONDS
-        )
+        if not self.segments:
+            return False
+        target = self.segments[0][0]
+        if abs(target - start) >= SPLICE_TOLERANCE_SECONDS:
+            return False
+        # A later start of the current source may lie nearer still.
+        later = next((t for t, _ in self.queue if t is not None and t > start), None)
+        return later is None or abs(later - target) >= abs(start - target)
 
     def needs_release(self) -> bool:
         return self.current.quality == AUDIO_ONLY and self.pending.quality != AUDIO_ONLY
@@ -626,6 +1132,8 @@ class Switcher:
         self.relay = relay
         self.pending: Source | None = None
         self.retry_at = 0.0
+        # Renditions that can't follow what mpv plays; not tried again.
+        self.impossible: set[str] = set()
         self.switches = 0
         self.mpv = None
         self.osd = (0, 0)
@@ -715,7 +1223,12 @@ class Switcher:
             return
         self.policy.tick(now)
         target = self.policy.target()
-        if target and target != self.source.quality and now >= self.retry_at:
+        if (
+            target
+            and target != self.source.quality
+            and target not in self.impossible
+            and now >= self.retry_at
+        ):
             # Numbered, so a source still winding down can't remove its
             # successor's log.
             self.switches += 1
@@ -731,23 +1244,13 @@ class Switcher:
         assert pending is not None
         spliced = self.relay.take_spliced()
         if spliced:
-            new, old = spliced
-            old.stop()
-            self.pending = None
-            self.policy.loaded(new.quality, now)
-            if new.quality == AUDIO_ONLY and old.quality != AUDIO_ONLY:
-                self.turn_video_off()
-            self.show(label(new.quality))
+            self.finish_switch(*spliced, now)
         elif pending.quality != self.policy.target():
             # Asked for something else meanwhile; the next step starts that.
             self.drop_pending()
-        elif pending.process.poll() is not None or (
-            # Video after audio may wait longer for mpv to play out its audio,
-            # which takes as long as playback is behind, and once released it
-            # is spliced in at once.
-            now - pending.started > SWITCH_TIMEOUT_SECONDS
-            and not (self.relay.awaiting_release or self.relay.released)
-        ):
+        elif self.relay.pending_unusable:
+            self.refuse(pending)
+        elif self.switch_failed(pending, now):
             if not self.drop_pending():
                 return
             self.retry_at = now + RETRY_SECONDS
@@ -758,6 +1261,32 @@ class Switcher:
             self.mpv.send(
                 ["get_property", "demuxer-cache-duration"], BUFFERED_REQUEST_ID
             )
+
+    def finish_switch(self, new: Source, old: Source, now: float) -> None:
+        old.stop()
+        self.pending = None
+        self.policy.loaded(new.quality, now)
+        if new.quality == AUDIO_ONLY and old.quality != AUDIO_ONLY:
+            self.turn_video_off()
+        self.show(label(new.quality))
+
+    def refuse(self, pending: Source) -> None:
+        """Drops a rendition that can't follow what mpv plays, for good."""
+        if not self.drop_pending():
+            return
+        self.impossible.add(pending.quality)
+        self.policy.switch_failed()
+        self.show(f"This stream can't switch to {label(pending.quality)}", 4000)
+
+    def switch_failed(self, pending: Source, now: float) -> bool:
+        """True once the pending source has ended or taken too long. Video
+        after audio may wait longer for mpv to play out its audio, which takes
+        as long as playback is behind, and once released it is spliced in at
+        once."""
+        return pending.process.poll() is not None or (
+            now - pending.started > SWITCH_TIMEOUT_SECONDS
+            and not (self.relay.awaiting_release or self.relay.released)
+        )
 
     def drop_pending(self) -> bool:
         """Stops the pending source, unless the relay has just spliced it in;
