@@ -365,6 +365,24 @@ class Mp4SegmenterTests(unittest.TestCase):
         self.assertEqual(joined, stream)
         self.assertEqual(starts, [10])
 
+    def test_an_hevc_keyframe_needs_both_vps_and_sps(self) -> None:
+        def start(*nals: bytes) -> bool | None:
+            data = bytearray(b"".join(nals))
+            return stream_quality.HeldStart(10, data, 0, len(data), 4, b"hevc").decide()
+
+        vps, sps, pps = nal(32 << 1, b"v"), nal(33 << 1, b"s"), nal(34 << 1, b"p")
+        picture = nal(19 << 1, b"idr")
+        self.assertTrue(start(vps, sps, pps, picture))
+        self.assertFalse(start(sps, pps, picture))
+        self.assertFalse(start(vps, pps, picture))
+
+    def test_a_different_nal_length_size_cant_follow(self) -> None:
+        track = stream_quality.Track(b"vide", VIDEO_SCALE, b"avc1", length_size=4)
+        other = stream_quality.Track(b"vide", VIDEO_SCALE, b"avc3", length_size=2)
+        self.assertFalse(other.matches(track))
+        other.length_size = 4
+        self.assertTrue(other.matches(track))
+
     def test_tells_which_streams_can_follow_which(self) -> None:
         def fed(data: bytes) -> stream_quality.Segmenter:
             segmenter = stream_quality.Segmenter()

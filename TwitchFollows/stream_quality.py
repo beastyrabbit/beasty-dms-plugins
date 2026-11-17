@@ -303,10 +303,12 @@ class Track:
         return CODEC_FAMILIES.get(self.codec, self.codec)
 
     def matches(self, other: Track) -> bool:
-        return (self.handler, self.timescale, self.family) == (
+        # mpv reads every sample with the NAL length size of the first header.
+        return (self.handler, self.timescale, self.family, self.length_size) == (
             other.handler,
             other.timescale,
             other.family,
+            other.length_size,
         )
 
 
@@ -443,6 +445,7 @@ class HeldStart:
         that can't be told yet."""
         position = self.offset
         end = self.offset + self.size if self.size else self.offset + MAX_PROBE_BYTES
+        missing = set(PARAMETER_SETS[self.family])
         while position < end:
             if position + self.length_size >= len(self.data):
                 return None if len(self.data) < self.offset + MAX_PROBE_BYTES else False
@@ -451,7 +454,8 @@ class HeldStart:
                 kind, picture = header & 0x1F, 1 <= header & 0x1F <= 5
             else:
                 kind, picture = header >> 1 & 0x3F, header >> 1 & 0x3F < 32
-            if kind in PARAMETER_SETS[self.family]:
+            missing.discard(kind)
+            if not missing:
                 return True
             if picture:
                 return False
