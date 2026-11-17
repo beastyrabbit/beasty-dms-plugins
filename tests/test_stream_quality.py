@@ -383,6 +383,16 @@ class Mp4SegmenterTests(unittest.TestCase):
         other.length_size = 4
         self.assertTrue(other.matches(track))
 
+    def test_different_sample_defaults_cant_follow(self) -> None:
+        # The new header's defaults never reach mpv, which keeps the first.
+        track = stream_quality.Track(b"vide", VIDEO_SCALE, b"avc1", 4, 33333, 17)
+        other = stream_quality.Track(b"vide", VIDEO_SCALE, b"avc1", 4, 33333, 35)
+        self.assertFalse(other.matches(track))
+        other.default_size = 17
+        self.assertTrue(other.matches(track))
+        other.default_duration = 16667
+        self.assertFalse(other.matches(track))
+
     def test_tells_which_streams_can_follow_which(self) -> None:
         def fed(data: bytes) -> stream_quality.Segmenter:
             segmenter = stream_quality.Segmenter()

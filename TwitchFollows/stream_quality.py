@@ -190,43 +190,54 @@ class TsSegmenter:
         position = 0
         while len(data) - position >= PACKET_SIZE:
             if data[position] != SYNC_BYTE:
-                # Out of step (not expected from streamlink): pass bytes on
-                # until the next sync byte, after any held segment start so
-                # that the order stays.
-                if self.held is not None:
-                    run += self.held
-                    self.held = None
-                found = data.find(bytes([SYNC_BYTE]), position + 1)
-                stop = found if found >= 0 else len(data)
-                run += data[position:stop]
-                position = stop
+                position = self.skip_to_sync(data, position, run)
                 continue
             packet = data[position : position + PACKET_SIZE]
             position += PACKET_SIZE
-            pid = (packet[1] & 0x1F) << 8 | packet[2]
-            if pid == 0 and packet[1] & 0x40:
-                if run:
-                    pieces.append((None, bytes(run)))
-                    run = bytearray()
-                if self.held:
-                    pieces.append((None, bytes(self.held)))
-                self.held = bytearray(packet)
-                continue
-            if self.held is None:
-                run += packet
-                continue
-            self.held += packet
-            timestamp = pes_timestamp(packet)
-            if timestamp is not None:
-                pieces.append((timestamp, bytes(self.held)))
-                self.held = None
-            elif len(self.held) >= self.MAX_HELD_PACKETS * PACKET_SIZE:
-                pieces.append((None, bytes(self.held)))
-                self.held = None
+            run = self.take_packet(packet, pieces, run)
         self.rest = data[position:]
         if run:
             pieces.append((None, bytes(run)))
         return pieces
+
+    def skip_to_sync(self, data: bytes, position: int, run: bytearray) -> int:
+        """Out of step (not expected from streamlink): passes bytes on until
+        the next sync byte, after any held segment start so that the order
+        stays. Returns where that sync byte is."""
+        if self.held is not None:
+            run += self.held
+            self.held = None
+        found = data.find(bytes([SYNC_BYTE]), position + 1)
+        stop = found if found >= 0 else len(data)
+        run += data[position:stop]
+        return stop
+
+    def take_packet(
+        self, packet: bytes, pieces: list[Piece], run: bytearray
+    ) -> bytearray:
+        """Adds one packet to the run, the held segment start or a new one;
+        returns the run to go on with."""
+        pid = (packet[1] & 0x1F) << 8 | packet[2]
+        if pid == 0 and packet[1] & 0x40:
+            if run:
+                pieces.append((None, bytes(run)))
+                run = bytearray()
+            if self.held:
+                pieces.append((None, bytes(self.held)))
+            self.held = bytearray(packet)
+            return run
+        if self.held is None:
+            run += packet
+            return run
+        self.held += packet
+        timestamp = pes_timestamp(packet)
+        if (
+            timestamp is not None
+            or len(self.held) >= self.MAX_HELD_PACKETS * PACKET_SIZE
+        ):
+            pieces.append((timestamp, bytes(self.held)))
+            self.held = None
+        return run
 
     def flush(self) -> bytes:
         """What is still held back once the stream has ended."""
@@ -295,20 +306,29 @@ class Track:
     codec: bytes
     # Bytes in front of each NAL unit, for H.264 and H.265.
     length_size: int = 0
-    default_flags: int = 0
+    # The sample defaults (trex) fragments fall back on.
+    default_duration: int = 0
     default_size: int = 0
+    default_flags: int = 0
 
     @property
     def family(self) -> bytes:
         return CODEC_FAMILIES.get(self.codec, self.codec)
 
     def matches(self, other: Track) -> bool:
-        # mpv reads every sample with the NAL length size of the first header.
-        return (self.handler, self.timescale, self.family, self.length_size) == (
-            other.handler,
-            other.timescale,
-            other.family,
-            other.length_size,
+        # mpv reads every fragment with the first header: its NAL length size
+        # and its sample defaults.
+        return self.key() == other.key()
+
+    def key(self) -> tuple:
+        return (
+            self.handler,
+            self.timescale,
+            self.family,
+            self.length_size,
+            self.default_duration,
+            self.default_size,
+            self.default_flags,
         )
 
 
@@ -324,28 +344,39 @@ def parse_moov(box: bytes) -> dict[int, Track]:
     for kind, s, e in child_boxes(box, *find_box(box, start, end, b"mvex")):
         if kind == b"trex" and e - s >= 24 and number(box, s + 4) in tracks:
             track = tracks[number(box, s + 4)]
+            track.default_duration = number(box, s + 12)
             track.default_size = number(box, s + 16)
             track.default_flags = number(box, s + 20)
     return tracks
 
 
+def header_field(box: bytes, span: tuple[int, int]) -> int:
+    """The track ID of a tkhd or the timescale of an mdhd, which sit after
+    the times, 4 or 8 bytes each by the box's version; 0 if it is too short."""
+    start, end = span
+    if end - start < 24:
+        return 0
+    return number(box, start + 20) if box[start] == 1 else number(box, start + 12)
+
+
+def nal_length_size(box: bytes, entry: tuple[bytes, int, int], family: bytes) -> int:
+    """Bytes in front of each NAL unit, from a sample entry's configuration
+    box, which follows the 78 bytes of a visual sample entry."""
+    config, at = (b"avcC", 4) if family == b"avc" else (b"hvcC", 21)
+    s, e = find_box(box, entry[1] + 78, entry[2], config)
+    return (box[s + at] & 3) + 1 if e - s > at else 0
+
+
 def parse_trak(box: bytes, start: int, end: int) -> tuple[int, Track]:
-    s, e = find_box(box, start, end, b"tkhd")
-    track_id = number(box, s + (20 if box[s] == 1 else 12)) if e - s >= 24 else 0
-    s, e = find_box(box, start, end, b"mdia", b"mdhd")
-    timescale = number(box, s + (20 if box[s] == 1 else 12)) if e - s >= 24 else 0
+    track_id = header_field(box, find_box(box, start, end, b"tkhd"))
+    timescale = header_field(box, find_box(box, start, end, b"mdia", b"mdhd"))
     s, e = find_box(box, start, end, b"mdia", b"hdlr")
     handler = bytes(box[s + 8 : s + 12]) if e - s >= 12 else b""
     s, e = find_box(box, start, end, b"mdia", b"minf", b"stbl", b"stsd")
     entry = next(iter(child_boxes(box, s + 8, e)), None) if e - s >= 8 else None
     track = Track(handler, timescale, entry[0] if entry else b"")
     if entry and track.family in PARAMETER_SETS:
-        # Configuration boxes follow the 78 bytes of a visual sample entry.
-        config = b"avcC" if track.family == b"avc" else b"hvcC"
-        s, e = find_box(box, entry[1] + 78, entry[2], config)
-        at = 4 if config == b"avcC" else 21
-        if e - s > at:
-            track.length_size = (box[s + at] & 3) + 1
+        track.length_size = nal_length_size(box, entry, track.family)
     return track_id, track
 
 
@@ -381,9 +412,33 @@ def parse_traf(
     if e - s < 8 or number(box, s + 4) not in tracks:
         return None
     track_id = number(box, s + 4)
+    flags, fields = parse_tfhd(box, s)
+    s, e = find_box(box, start, end, b"tfdt")
+    if e - s < 8:
+        return None
+    decode_time = number(box, s + 4, 8 if box[s] == 1 else 4)
+    s, e = find_box(box, start, end, b"trun")
+    if e - s < 8 or not number(box, s + 4):
+        return None
+    # The track's defaults, then the fragment's, then the run's own.
     track = tracks[track_id]
-    flags = number(box, s, 4) & 0xFFFFFF
-    at = s + 8
+    sample = {
+        "flags": fields.get("flags", track.default_flags),
+        "size": fields.get("size", track.default_size),
+    }
+    offset = first_sample(box, s, sample)
+    # Offsets count from the moof only without a base offset, and past the
+    # first track only if the header says so.
+    if "base" in fields or not (flags & 0x20000 or first):
+        offset = None
+    sync = not sample["flags"] & NON_SYNC_SAMPLE
+    return Fragment(track_id, decode_time, sync, offset, sample["size"])
+
+
+def parse_tfhd(box: bytes, start: int) -> tuple[int, dict[str, int]]:
+    """A tfhd's flags and the optional fields they say are there."""
+    flags = number(box, start) & 0xFFFFFF
+    at = start + 8
     fields = {}
     for bit, name, size in (
         (0x1, "base", 8),
@@ -395,37 +450,28 @@ def parse_traf(
         if flags & bit:
             fields[name] = number(box, at, size)
             at += size
-    s, e = find_box(box, start, end, b"tfdt")
-    if e - s < 8:
-        return None
-    decode_time = number(box, s + 4, 8 if box[s] == 1 else 4)
-    s, e = find_box(box, start, end, b"trun")
-    if e - s < 8 or not number(box, s + 4):
-        return None
-    run_flags = number(box, s, 4) & 0xFFFFFF
-    at = s + 8
+    return flags, fields
+
+
+def first_sample(box: bytes, start: int, sample: dict[str, int]) -> int | None:
+    """Reads a trun's first sample into `sample` (flags and size), and
+    returns the run's data offset, if it has one."""
+    run_flags = number(box, start) & 0xFFFFFF
+    at = start + 8
     offset = None
     if run_flags & 0x1:
         offset = int.from_bytes(box[at : at + 4], "big", signed=True)
         at += 4
-    # Offsets count from the moof only without a base offset, and past the
-    # first track only if the header says so.
-    if "base" in fields or not (flags & 0x20000 or first):
-        offset = None
-    sample_flags = fields.get("flags", track.default_flags)
     if run_flags & 0x4:
-        sample_flags = number(box, at)
+        sample["flags"] = number(box, at)
         at += 4
-    size = fields.get("size", track.default_size)
     at += 4 if run_flags & 0x100 else 0
     if run_flags & 0x200:
-        size = number(box, at)
+        sample["size"] = number(box, at)
         at += 4
     if run_flags & 0x400 and not run_flags & 0x4:
-        sample_flags = number(box, at)
-    return Fragment(
-        track_id, decode_time, not sample_flags & NON_SYNC_SAMPLE, offset, size
-    )
+        sample["flags"] = number(box, at)
+    return offset
 
 
 @dataclass
@@ -998,16 +1044,7 @@ class Relay:
         while self.queue:
             start, piece = self.queue[0]
             if start is not None and self.pending:
-                # Segments the current source has already passed can't be used.
-                self.segments = [
-                    s for s in self.segments if s[0] > start - SPLICE_TOLERANCE_SECONDS
-                ]
-                # MP4 audio starts at every fragment, which the renditions
-                # don't all cut alike: of those near this start, the nearest.
-                while len(self.segments) > 1 and abs(self.segments[1][0] - start) < abs(
-                    self.segments[0][0] - start
-                ):
-                    self.segments.pop(0)
+                self.drop_passed_segments(start)
                 if self.has_segment(start):
                     if not self.ready(start):
                         return out
@@ -1020,6 +1057,19 @@ class Relay:
             out.append(piece)
             self.queue.pop(0)
         return out
+
+    def drop_passed_segments(self, start: float) -> None:
+        """Drops the pending segments the current source has already passed,
+        which can't be used. MP4 audio starts at every fragment, which the
+        renditions don't all cut alike: of those near this start, the nearest
+        stays first."""
+        self.segments = [
+            s for s in self.segments if s[0] > start - SPLICE_TOLERANCE_SECONDS
+        ]
+        while len(self.segments) > 1 and abs(self.segments[1][0] - start) < abs(
+            self.segments[0][0] - start
+        ):
+            self.segments.pop(0)
 
     def has_segment(self, start: float) -> bool:
         if not self.segments:
@@ -1194,29 +1244,13 @@ class Switcher:
         assert pending is not None
         spliced = self.relay.take_spliced()
         if spliced:
-            new, old = spliced
-            old.stop()
-            self.pending = None
-            self.policy.loaded(new.quality, now)
-            if new.quality == AUDIO_ONLY and old.quality != AUDIO_ONLY:
-                self.turn_video_off()
-            self.show(label(new.quality))
+            self.finish_switch(*spliced, now)
         elif pending.quality != self.policy.target():
             # Asked for something else meanwhile; the next step starts that.
             self.drop_pending()
         elif self.relay.pending_unusable:
-            if not self.drop_pending():
-                return
-            self.impossible.add(pending.quality)
-            self.policy.switch_failed()
-            self.show(f"This stream can't switch to {label(pending.quality)}", 4000)
-        elif pending.process.poll() is not None or (
-            # Video after audio may wait longer for mpv to play out its audio,
-            # which takes as long as playback is behind, and once released it
-            # is spliced in at once.
-            now - pending.started > SWITCH_TIMEOUT_SECONDS
-            and not (self.relay.awaiting_release or self.relay.released)
-        ):
+            self.refuse(pending)
+        elif self.switch_failed(pending, now):
             if not self.drop_pending():
                 return
             self.retry_at = now + RETRY_SECONDS
@@ -1227,6 +1261,32 @@ class Switcher:
             self.mpv.send(
                 ["get_property", "demuxer-cache-duration"], BUFFERED_REQUEST_ID
             )
+
+    def finish_switch(self, new: Source, old: Source, now: float) -> None:
+        old.stop()
+        self.pending = None
+        self.policy.loaded(new.quality, now)
+        if new.quality == AUDIO_ONLY and old.quality != AUDIO_ONLY:
+            self.turn_video_off()
+        self.show(label(new.quality))
+
+    def refuse(self, pending: Source) -> None:
+        """Drops a rendition that can't follow what mpv plays, for good."""
+        if not self.drop_pending():
+            return
+        self.impossible.add(pending.quality)
+        self.policy.switch_failed()
+        self.show(f"This stream can't switch to {label(pending.quality)}", 4000)
+
+    def switch_failed(self, pending: Source, now: float) -> bool:
+        """True once the pending source has ended or taken too long. Video
+        after audio may wait longer for mpv to play out its audio, which takes
+        as long as playback is behind, and once released it is spliced in at
+        once."""
+        return pending.process.poll() is not None or (
+            now - pending.started > SWITCH_TIMEOUT_SECONDS
+            and not (self.relay.awaiting_release or self.relay.released)
+        )
 
     def drop_pending(self) -> bool:
         """Stops the pending source, unless the relay has just spliced it in;
