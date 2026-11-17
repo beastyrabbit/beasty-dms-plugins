@@ -205,11 +205,11 @@ class TsSegmenter:
         the next sync byte, after any held segment start so that the order
         stays. Returns where that sync byte is."""
         if self.held is not None:
-            run += self.held
+            run.extend(self.held)
             self.held = None
         found = data.find(bytes([SYNC_BYTE]), position + 1)
         stop = found if found >= 0 else len(data)
-        run += data[position:stop]
+        run.extend(data[position:stop])
         return stop
 
     def take_packet(
@@ -227,7 +227,7 @@ class TsSegmenter:
             self.held = bytearray(packet)
             return run
         if self.held is None:
-            run += packet
+            run.extend(packet)
             return run
         self.held += packet
         timestamp = pes_timestamp(packet)
