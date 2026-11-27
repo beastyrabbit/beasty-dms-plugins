@@ -1041,6 +1041,10 @@ class Playback:
         switcher = self.channel.switcher
         if switcher.pending:
             switcher.drop_pending()
+        # A splice the last step didn't see leaves its old source running.
+        spliced = self.channel.relay.take_spliced()
+        if spliced:
+            spliced[1].stop()
         self.channel.relay.current.process.poll()  # reaps it
 
     def check_back(self) -> None:
@@ -1233,8 +1237,6 @@ class Playback:
             raise FollowError("mpv has closed.") from None
         relay = stream_quality.Relay(output, source, keep_open=True)
         relay.start()
-        # The old channel's still, shown under audio only.
-        mpv.send(["overlay-remove", stream_quality.FRAME_OVERLAY_ID])
         old.switcher.close()
         old.relay.stop()
         old.relay.current.stop()
@@ -1247,10 +1249,13 @@ class Playback:
         switcher = stream_quality.Switcher(
             self.streamlink, login, self.ipc_path, policy, relay
         )
+        # Owned from here: should mpv go now, close() ends it all.
         self.channel = Channel(login, lock, relay, switcher, time.time(), fifo)
         self.next_probe = None
-        # Video back on in case audio only had turned it off; an audio-only
-        # stream simply has none.
+        # The old channel's still, shown under audio only, and video back on
+        # in case audio only had turned it off; an audio-only stream simply
+        # has none.
+        mpv.send(["overlay-remove", stream_quality.FRAME_OVERLAY_ID])
         mpv.send(["set_property", "vid", "auto"])
 
     def rename(self, old: str, target: str) -> None:

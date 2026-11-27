@@ -32,6 +32,11 @@ local function controls_shown(shown)
 	mp.commandv("script-message-to", "uosc", "set-min-visibility", shown and "1" or "0", "controls")
 end
 
+local function played_out()
+	local left = mp.get_property_number("demuxer-cache-duration")
+	return left == nil or left < LEFT_SECONDS or mp.get_property_bool("paused-for-cache", false)
+end
+
 local function stop()
 	if waiting then
 		waiting:kill()
@@ -46,7 +51,15 @@ local function stop()
 	end
 end
 
+local wait_for_end
+
 local function tick()
+	if not played_out() then
+		-- Seeked back: the countdown starts again once that has played.
+		stop()
+		wait_for_end()
+		return
+	end
 	if remaining <= 0 then
 		mp.command("quit")
 		return
@@ -71,9 +84,14 @@ local function count_down()
 	tick()
 end
 
-local function played_out()
-	local left = mp.get_property_number("demuxer-cache-duration")
-	return left == nil or left < LEFT_SECONDS or mp.get_property_bool("paused-for-cache", false)
+wait_for_end = function()
+	waiting = mp.add_periodic_timer(0.5, function()
+		if played_out() then
+			waiting:kill()
+			waiting = nil
+			count_down()
+		end
+	end)
 end
 
 mp.observe_property(ENDED, "native", function(_, value)
@@ -81,13 +99,7 @@ mp.observe_property(ENDED, "native", function(_, value)
 	if ended > 0 and ended ~= counted then
 		counted = ended
 		stop()
-		waiting = mp.add_periodic_timer(0.5, function()
-			if played_out() then
-				waiting:kill()
-				waiting = nil
-				count_down()
-			end
-		end)
+		wait_for_end()
 	elseif ended == 0 then
 		stop()
 	end

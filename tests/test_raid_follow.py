@@ -627,11 +627,13 @@ open(runtime + f"/{{channel}}.done", "a").close()
         the chat with the chat button when hide_chat is set. The target
         "keep" presses the keep-open button instead, and "offline" takes the
         source channel offline. Returns the widths mpv showed, in order;
-        self.paths has what mpv played, and self.overlays says for each chat
-        overlay started whether it started hidden."""
+        self.played has how far mpv played each path, self.counted the paths
+        it counted down on, and self.overlays says for each chat overlay
+        started whether it started hidden."""
         widths: list[int] = []
         self.overlays: list[bool] = []
-        self.paths: list[str] = []
+        self.played: dict[str, float] = {}
+        self.counted: set[str] = set()
         pending = list(raids)
         finished = threading.Event()
 
@@ -643,19 +645,26 @@ open(runtime + f"/{{channel}}.done", "a").close()
                 try:
                     connection = twitch_follows.connect_ipc(sockets[0])
                     with connection.sock:
-                        width, path, closing = (
+                        width, path, position, closing = (
                             twitch_follows.ipc_request(
                                 connection, ["get_property", name], timeout=1
                             ).get("data")
-                            for name in ("width", "path", "user-data/twitch-closing")
+                            for name in (
+                                "width",
+                                "path",
+                                "time-pos",
+                                "user-data/twitch-closing",
+                            )
                         )
-                except (IndexError, OSError):
+                except (IndexError, OSError, EOFError):
                     time.sleep(0.1)
                     continue
                 if width and (not widths or widths[-1] != width):
                     widths.append(width)
-                if path and path not in self.paths:
-                    self.paths.append(path)
+                if path:
+                    self.played[path] = max(self.played.get(path, 0), position or 0)
+                    if closing is True:
+                        self.counted.add(path)
                 if not pending:
                     time.sleep(0.1)
                     continue
@@ -677,7 +686,7 @@ open(runtime + f"/{{channel}}.done", "a").close()
                 time.sleep(0.1)
             if not finished.is_set():
                 # Hung: close mpv, so the test fails instead of waiting.
-                with contextlib.suppress(IndexError, OSError):
+                with contextlib.suppress(IndexError, OSError, EOFError):
                     sockets = list(self.runtime.glob("twitch-follows-big-*.sock"))
                     connection = twitch_follows.connect_ipc(sockets[0])
                     with connection.sock:
@@ -761,9 +770,13 @@ open(runtime + f"/{{channel}}.done", "a").close()
         # another try.
         self.play([("closing", "big", "keep")], grace=2, reconnect=8)
         self.assertEqual(self.streamlink_runs(), ["big", "big"])
-        # stdin first, then the channel again from a FIFO.
-        self.assertEqual(len(self.paths), 2)
-        self.assertTrue(self.paths[1].endswith(".ts"))
+        # stdin first, then the channel again from a FIFO, played and
+        # counted down on.
+        paths = list(self.played)
+        self.assertEqual(len(paths), 2)
+        self.assertTrue(paths[1].endswith(".ts"))
+        self.assertGreater(self.played[paths[1]], 1)
+        self.assertEqual(self.counted, set(paths))
 
     def test_an_offline_channel_is_tried_again_until_the_window_closes(
         self,
