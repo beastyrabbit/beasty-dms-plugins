@@ -430,6 +430,18 @@ class FollowTests(TempDirs):
         switch.assert_not_called()
         self.assertEqual(playback.channel.login, "big")
 
+    def test_closing_after_an_error_stops_the_relay_and_its_streamlink(
+        self,
+    ) -> None:
+        # As when mpv goes away right after a handoff, before play() ends it.
+        playback = self.playback()
+        playback.joined = None
+        process = playback.channel.relay.current.process
+        process.poll.return_value = None
+        playback.close(self.runtime / "big.log", MagicMock())
+        playback.channel.relay.stop.assert_called_once_with(timeout=0)
+        process.kill.assert_called_once()
+
     def test_a_failed_follow_says_so_and_frees_the_raided_channel(self) -> None:
         playback = self.playback()
         with (

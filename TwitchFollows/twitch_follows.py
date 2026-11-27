@@ -1107,10 +1107,14 @@ class Playback:
     def close(self, log_path: Path, lock: IO) -> None:
         """Ends what play() and raids started: the switcher, the stream's place
         in its group (its chat tab closes with it, and the chat window with
-        the group's last stream), the chat overlay and the channel lock."""
+        the group's last stream), the chat overlay and the channel lock, and
+        the relay and its streamlink when an error skipped play()'s ending."""
         self.drop_probe()
         channel = self.channel
         if channel:
+            channel.relay.stop(timeout=0)
+            if channel.relay.current.process.poll() is None:
+                channel.relay.current.process.kill()
             channel.switcher.close()
             if channel.switcher.source.log_path != log_path:
                 channel.switcher.source.log_path.unlink(missing_ok=True)
