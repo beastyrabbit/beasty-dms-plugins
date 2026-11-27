@@ -1112,14 +1112,16 @@ class Playback:
         self.drop_probe()
         channel = self.channel
         if channel:
-            # Waited for, so a splice under way can't swap in a streamlink
-            # after this one is killed.
-            channel.relay.stop()
-            process = channel.relay.current.process
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-            channel.switcher.close()
+            try:
+                channel.relay.stop()
+                # Settles a switch under way: drops the new streamlink or,
+                # once spliced, stops the old one.
+                channel.switcher.close()
+            finally:
+                process = channel.relay.current.process
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
             if channel.switcher.source.log_path != log_path:
                 channel.switcher.source.log_path.unlink(missing_ok=True)
             if channel.fifo:
