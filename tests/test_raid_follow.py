@@ -439,8 +439,9 @@ class FollowTests(TempDirs):
         process = playback.channel.relay.current.process
         process.poll.return_value = None
         playback.close(self.runtime / "big.log", MagicMock())
-        playback.channel.relay.stop.assert_called_once_with(timeout=0)
+        playback.channel.relay.stop.assert_called_once_with()
         process.kill.assert_called_once()
+        process.wait.assert_called_once()
 
     def test_a_failed_follow_says_so_and_frees_the_raided_channel(self) -> None:
         playback = self.playback()
