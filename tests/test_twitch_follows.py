@@ -399,7 +399,7 @@ class LaunchTests(unittest.TestCase):
         close_at_end = patch.object(
             twitch_follows.Playback,
             "show_ended",
-            lambda playback, ended: ended and playback.channel.relay.stop(),
+            lambda playback: playback.channel.relay.stop(),
         )
         close_at_end.start()
         self.addCleanup(close_at_end.stop)

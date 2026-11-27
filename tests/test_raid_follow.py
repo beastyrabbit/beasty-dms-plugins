@@ -3,6 +3,7 @@ stream taking its window over to the raided channel."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -621,13 +622,16 @@ open(runtime + f"/{{channel}}.done", "a").close()
         reconnect: float = 60,
     ) -> list[int]:
         """Watches big; each raid (when, source, target) is sent once mpv shows
-        that width ("320") or once that channel's streamlink ended ("done:big"),
-        after hiding the chat with the chat button when hide_chat is set. The
-        target "keep" presses the keep-open button instead, and "offline"
-        takes the source channel offline. Returns the widths mpv showed, in order; self.overlays says for each
-        chat overlay started whether it started hidden."""
+        that width ("320"), once that channel's streamlink ended ("done:big")
+        or once the window counts down to closing ("closing"), after hiding
+        the chat with the chat button when hide_chat is set. The target
+        "keep" presses the keep-open button instead, and "offline" takes the
+        source channel offline. Returns the widths mpv showed, in order;
+        self.paths has what mpv played, and self.overlays says for each chat
+        overlay started whether it started hidden."""
         widths: list[int] = []
         self.overlays: list[bool] = []
+        self.paths: list[str] = []
         pending = list(raids)
         finished = threading.Event()
 
@@ -639,21 +643,27 @@ open(runtime + f"/{{channel}}.done", "a").close()
                 try:
                     connection = twitch_follows.connect_ipc(sockets[0])
                     with connection.sock:
-                        reply = twitch_follows.ipc_request(
-                            connection, ["get_property", "width"], timeout=1
+                        width, path, closing = (
+                            twitch_follows.ipc_request(
+                                connection, ["get_property", name], timeout=1
+                            ).get("data")
+                            for name in ("width", "path", "user-data/twitch-closing")
                         )
                 except (IndexError, OSError):
                     time.sleep(0.1)
                     continue
-                width = reply.get("data")
                 if width and (not widths or widths[-1] != width):
                     widths.append(width)
+                if path and path not in self.paths:
+                    self.paths.append(path)
                 if not pending:
                     time.sleep(0.1)
                     continue
                 when, source, target = pending[0]
                 if when.startswith("done:"):
                     ready = (self.runtime / f"{when[5:]}.done").exists()
+                elif when == "closing":
+                    ready = closing is True
                 else:
                     ready = width == int(when)
                 if ready:
@@ -665,6 +675,13 @@ open(runtime + f"/{{channel}}.done", "a").close()
                     self.act(sockets[0], source, target, number)
                     pending.pop(0)
                 time.sleep(0.1)
+            if not finished.is_set():
+                # Hung: close mpv, so the test fails instead of waiting.
+                with contextlib.suppress(IndexError, OSError):
+                    sockets = list(self.runtime.glob("twitch-follows-big-*.sock"))
+                    connection = twitch_follows.connect_ipc(sockets[0])
+                    with connection.sock:
+                        connection.send(["quit"])
 
         watcher = threading.Thread(target=watch_mpv, daemon=True)
         tools = {"streamlink": str(self.streamlink), "mpv": str(self.mpv)}
@@ -738,10 +755,15 @@ open(runtime + f"/{{channel}}.done", "a").close()
     def test_a_window_kept_open_plays_the_channel_again_once_it_is_back(
         self,
     ) -> None:
-        # Kept open, the window outlasts the countdown and is still there when
-        # streamlink is tried again; the next end counts down afresh.
-        self.play([("done:big", "big", "keep")], grace=2, reconnect=3)
+        # Kept open, the window outlasts the countdown (which starts once mpv
+        # has played its 4 seconds) and is still there when streamlink is
+        # tried again; the next end counts down afresh and closes it before
+        # another try.
+        self.play([("closing", "big", "keep")], grace=2, reconnect=8)
         self.assertEqual(self.streamlink_runs(), ["big", "big"])
+        # stdin first, then the channel again from a FIFO.
+        self.assertEqual(len(self.paths), 2)
+        self.assertTrue(self.paths[1].endswith(".ts"))
 
     def test_an_offline_channel_is_tried_again_until_the_window_closes(
         self,

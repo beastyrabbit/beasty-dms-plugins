@@ -136,8 +136,10 @@ END_GRACE_SECONDS = 60
 # For twitch_end.lua: how many times the stream has ended while it has, 0
 # while it plays. Counted, so an end right after another still counts down.
 ENDED_PROPERTY = "user-data/twitch-stream-ended"
-# How often a window whose stream ended starts streamlink to see if it's back.
+# How often a window whose stream ended starts streamlink to see if it's back,
+# and how long that streamlink may take to bring the stream.
 RECONNECT_SECONDS = 20
+PROBE_SECONDS = 60
 # How often a stream that follows raids makes sure a watcher runs.
 WATCHER_CHECK_SECONDS = 30
 # A running --raid-login's progress for the settings page: its pid and the
@@ -1010,39 +1012,44 @@ class Playback:
             chat_sync.step(current)
             self.check_raids(current)
             relay = self.channel.relay
-            ended = relay.source_ended and relay.delivered
-            self.show_ended(ended)
-            if ended:
+            if relay.source_ended and relay.delivered:
                 # mpv waits on the last picture until twitch_end.lua or the
                 # user closes it, a raid comes or the channel is back.
+                self.show_ended()
                 self.check_back()
                 time.sleep(0.2)
             else:
                 self.channel.switcher.step(0.2)
         return False
 
-    def show_ended(self, ended: bool) -> None:
-        """Tells twitch_end.lua whether the stream has ended, which starts or
-        stops its countdown to closing the window."""
-        if ended == bool(self.end_shown):
+    def show_ended(self) -> None:
+        """Tells twitch_end.lua that the stream has ended, which starts its
+        countdown to closing the window; load() tells it when one plays."""
+        if self.end_shown:
             return
-        value = self.ends + 1 if ended else 0
         try:
             mpv = connect_ipc(self.ipc_path)
         except OSError:
             return  # tried again on the next round
         with contextlib.closing(mpv.sock):
-            mpv.send(["set_property", ENDED_PROPERTY, value])
-        self.end_shown = value
-        self.ends = max(self.ends, value)
-        self.next_probe = time.monotonic() + RECONNECT_SECONDS if ended else None
+            mpv.send(["set_property", ENDED_PROPERTY, self.ends + 1])
+        self.ends += 1
+        self.end_shown = self.ends
+        self.next_probe = time.monotonic() + RECONNECT_SECONDS
+        # Nothing is switched any more: a quality switch under way would
+        # leave its streamlink stuck on a pipe nobody reads.
+        switcher = self.channel.switcher
+        if switcher.pending:
+            switcher.drop_pending()
+        self.channel.relay.current.process.poll()  # reaps it
 
     def check_back(self) -> None:
         """While the stream has ended, starts streamlink for the channel now
         and then; once one streams, the window plays it again."""
         probe = self.probe
+        now = time.monotonic()
         if probe is None:
-            if self.next_probe is not None and time.monotonic() >= self.next_probe:
+            if self.next_probe is not None and now >= self.next_probe:
                 self.probes += 1
                 login = self.channel.login
                 selection, _ = raid_selection(
@@ -1058,10 +1065,12 @@ class Playback:
         waiting = fcntl.ioctl(probe.process.stdout, termios.FIONREAD, b"\0" * 4)
         if struct.unpack("i", waiting)[0] > 0:
             self.probe = None
+            # In case it fails; load() clears it once the stream plays.
+            self.next_probe = now + RECONNECT_SECONDS
             self.resume(probe)
-        elif probe.process.poll() is not None:  # still offline
-            self.drop_probe()
-            self.next_probe = time.monotonic() + RECONNECT_SECONDS
+        elif probe.process.poll() is not None or now - probe.started > PROBE_SECONDS:
+            self.drop_probe()  # still offline, or stuck
+            self.next_probe = now + RECONNECT_SECONDS
 
     def drop_probe(self) -> None:
         if self.probe:
@@ -1202,19 +1211,26 @@ class Playback:
         fifo = runtime_path(f"twitch-follows-{os.getpid()}-{self.fifos}.ts")
         fifo.unlink(missing_ok=True)
         os.mkfifo(fifo, 0o600)
-        reply = ipc_request(mpv, ["loadfile", str(fifo), "replace"])
-        if reply.get("error") != "success":
+        try:
+            # The end's countdown stops first, so it can't close the window
+            # under the new stream. Should this fail, wait() starts another.
+            mpv.send(["set_property", ENDED_PROPERTY, 0])
+            self.end_shown = 0
+            reply = ipc_request(mpv, ["loadfile", str(fifo), "replace"])
+            if reply.get("error") != "success":
+                raise FollowError("mpv did not load the stream.")
+            # From here mpv no longer plays the old channel.
+            output = open_fifo(fifo, self.viewer)
+            if output is None:
+                self.gave_up = True
+                self.viewer.terminate()
+                raise FollowError("mpv did not open the stream.")
+        except (OSError, EOFError, FollowError) as error:
             source.stop()
             fifo.unlink(missing_ok=True)
-            raise FollowError("mpv did not load the stream.")
-        # From here mpv no longer plays the old channel.
-        output = open_fifo(fifo, self.viewer)
-        if output is None:
-            source.stop()
-            fifo.unlink(missing_ok=True)
-            self.gave_up = True
-            self.viewer.terminate()
-            raise FollowError("mpv did not open the stream.")
+            if isinstance(error, FollowError):
+                raise
+            raise FollowError("mpv has closed.") from None
         relay = stream_quality.Relay(output, source, keep_open=True)
         relay.start()
         # The old channel's still, shown under audio only.
@@ -1232,9 +1248,6 @@ class Playback:
             self.streamlink, login, self.ipc_path, policy, relay
         )
         self.channel = Channel(login, lock, relay, switcher, time.time(), fifo)
-        # Playing again, even if the new stream ends before wait() sees it.
-        mpv.send(["set_property", ENDED_PROPERTY, 0])
-        self.end_shown = 0
         self.next_probe = None
         # Video back on in case audio only had turned it off; an audio-only
         # stream simply has none.
