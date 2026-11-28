@@ -140,6 +140,12 @@ ENDED_PROPERTY = "user-data/twitch-stream-ended"
 # and how long that streamlink may take to bring the stream.
 RECONNECT_SECONDS = 20
 PROBE_SECONDS = 60
+# What a streamlink must have written to count as streaming: more than an
+# MP4 header alone.
+PROBE_BYTES = 32 * 1024
+# mpv has played out what it buffered with less than this left (as in
+# twitch_end.lua); only then does the channel coming back replace it.
+PLAYED_OUT_SECONDS = 1
 # How often a stream that follows raids makes sure a watcher runs.
 WATCHER_CHECK_SECONDS = 30
 # A running --raid-login's progress for the settings page: its pid and the
@@ -1053,21 +1059,25 @@ class Playback:
         probe = self.probe
         now = time.monotonic()
         if probe is None:
-            if self.next_probe is not None and now >= self.next_probe:
-                self.probes += 1
-                login = self.channel.login
-                selection, _ = raid_selection(
-                    self.quality, self.channel.switcher.policy.audio_only
-                )
-                log = runtime_path(f"twitch-follows-{login}-back{self.probes}.log")
-                self.probe = stream_quality.Source.start(
-                    self.streamlink, login, selection, log
-                )
+            if self.next_probe is None or now < self.next_probe:
+                return
+            if not self.played_out():
+                self.next_probe = now + 1  # the viewer is behind live
+                return
+            self.probes += 1
+            login = self.channel.login
+            selection, _ = raid_selection(
+                self.quality, self.channel.switcher.policy.audio_only
+            )
+            log = runtime_path(f"twitch-follows-{login}-back{self.probes}.log")
+            self.probe = stream_quality.Source.start(
+                self.streamlink, login, selection, log
+            )
             return
         # Bytes waiting, not just readable: a streamlink that found nothing
         # leaves a pipe that reads as end of file.
         waiting = fcntl.ioctl(probe.process.stdout, termios.FIONREAD, b"\0" * 4)
-        if struct.unpack("i", waiting)[0] > 0:
+        if struct.unpack("i", waiting)[0] >= PROBE_BYTES:
             self.probe = None
             # In case it fails; load() clears it once the stream plays.
             self.next_probe = now + RECONNECT_SECONDS
@@ -1075,6 +1085,21 @@ class Playback:
         elif probe.process.poll() is not None or now - probe.started > PROBE_SECONDS:
             self.drop_probe()  # still offline, or stuck
             self.next_probe = now + RECONNECT_SECONDS
+
+    def played_out(self) -> bool:
+        """Whether mpv has played what it buffered, so a stream loaded now
+        takes nothing from a viewer who paused or went back."""
+        try:
+            mpv = connect_ipc(self.ipc_path)
+        except OSError:
+            return False
+        with contextlib.closing(mpv.sock):
+            try:
+                reply = ipc_request(mpv, ["get_property", "demuxer-cache-duration"])
+            except (OSError, EOFError):
+                return False
+        left = reply.get("data")
+        return not isinstance(left, (int, float)) or left < PLAYED_OUT_SECONDS
 
     def drop_probe(self) -> None:
         if self.probe:
@@ -1223,9 +1248,9 @@ class Playback:
         old = self.channel
         self.fifos += 1
         fifo = runtime_path(f"twitch-follows-{os.getpid()}-{self.fifos}.ts")
-        fifo.unlink(missing_ok=True)
-        os.mkfifo(fifo, 0o600)
         try:
+            fifo.unlink(missing_ok=True)
+            os.mkfifo(fifo, 0o600)
             # The end's countdown stops first, so it can't close the window
             # under the new stream. Should this fail, wait() starts another.
             mpv.send(["set_property", ENDED_PROPERTY, 0])
@@ -1260,7 +1285,10 @@ class Playback:
             self.streamlink, login, self.ipc_path, policy, relay
         )
         # Owned from here: should mpv go now, close() ends it all.
-        self.channel = Channel(login, lock, relay, switcher, time.time(), fifo)
+        # The same channel back keeps telling its raids from older ones as
+        # before.
+        started = old.started if login == old.login else time.time()
+        self.channel = Channel(login, lock, relay, switcher, started, fifo)
         self.next_probe = None
         # The old channel's still, shown under audio only, and video back on
         # in case audio only had turned it off; an audio-only stream simply

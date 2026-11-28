@@ -430,6 +430,40 @@ class FollowTests(TempDirs):
         switch.assert_not_called()
         self.assertEqual(playback.channel.login, "big")
 
+    def test_the_channel_is_tried_again_only_once_mpv_has_played_out(self) -> None:
+        playback = self.playback()
+        playback.channel.switcher.policy.audio_only = False
+        playback.next_probe = 0
+        with (
+            patch.object(playback, "played_out", return_value=False),
+            patch.object(twitch_follows.stream_quality.Source, "start") as start,
+        ):
+            playback.check_back()
+        start.assert_not_called()
+        self.assertGreater(playback.next_probe, 0)
+        playback.next_probe = 0
+        with (
+            patch.object(playback, "played_out", return_value=True),
+            patch.object(twitch_follows.stream_quality.Source, "start") as start,
+        ):
+            playback.check_back()
+        start.assert_called_once()
+
+    def test_a_header_alone_does_not_bring_the_channel_back(self) -> None:
+        playback = self.playback()
+        process = subprocess.Popen(
+            ["sh", "-c", "head -c 2000 /dev/zero; sleep 5"], stdout=subprocess.PIPE
+        )
+        self.addCleanup(process.stdout.close)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        playback.probe = MagicMock(process=process, started=time.monotonic())
+        time.sleep(0.3)
+        with patch.object(playback, "resume") as resume:
+            playback.check_back()
+        resume.assert_not_called()
+        self.assertIsNotNone(playback.probe)
+
     def test_closing_after_an_error_stops_the_relay_and_its_streamlink(
         self,
     ) -> None:
@@ -640,13 +674,13 @@ open(runtime + f"/{{channel}}.done", "a").close()
         the chat with the chat button when hide_chat is set. The target
         "keep" presses the keep-open button instead, and "offline" takes the
         source channel offline. Returns the widths mpv showed, in order;
-        self.played has how far mpv played each path, self.counted the paths
-        it counted down on, and self.overlays says for each chat overlay
+        self.played has how far mpv played each path, self.counted where on
+        each path the countdown started, and self.overlays says for each chat overlay
         started whether it started hidden."""
         widths: list[int] = []
         self.overlays: list[bool] = []
         self.played: dict[str, float] = {}
-        self.counted: set[str] = set()
+        self.counted: dict[str, float] = {}
         pending = list(raids)
         finished = threading.Event()
 
@@ -677,7 +711,7 @@ open(runtime + f"/{{channel}}.done", "a").close()
                 if path:
                     self.played[path] = max(self.played.get(path, 0), position or 0)
                     if closing is True:
-                        self.counted.add(path)
+                        self.counted.setdefault(path, position or 0)
                 if not pending:
                     time.sleep(0.1)
                     continue
@@ -769,9 +803,11 @@ open(runtime + f"/{{channel}}.done", "a").close()
     def test_an_ended_stream_waits_and_its_window_closes_on_its_own(self) -> None:
         started = time.monotonic()
         self.play([], grace=3)
-        # 4 seconds of video and the countdown, which starts when streamlink
-        # is done (well before mpv has played what it buffered).
-        self.assertGreater(time.monotonic() - started, 3)
+        # The countdown starts once mpv has played the 4 seconds it buffered,
+        # not when streamlink is done (long before that).
+        self.assertGreater(self.counted["-"], 2.5)
+        # Played with about a second left, then 3 seconds of countdown.
+        self.assertGreater(time.monotonic() - started, 5)
         self.assertEqual(self.streamlink_runs(), ["big"])
 
     def test_a_window_kept_open_plays_the_channel_again_once_it_is_back(
@@ -789,7 +825,7 @@ open(runtime + f"/{{channel}}.done", "a").close()
         self.assertEqual(len(paths), 2)
         self.assertTrue(paths[1].endswith(".ts"))
         self.assertGreater(self.played[paths[1]], 1)
-        self.assertEqual(self.counted, set(paths))
+        self.assertEqual(set(self.counted), set(paths))
 
     def test_an_offline_channel_is_tried_again_until_the_window_closes(
         self,
