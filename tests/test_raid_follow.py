@@ -4,6 +4,7 @@ stream taking its window over to the raided channel."""
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import shutil
@@ -463,6 +464,41 @@ class FollowTests(TempDirs):
             playback.check_back()
         resume.assert_not_called()
         self.assertIsNotNone(playback.probe)
+
+    def streaming_probe(self, playback: twitch_follows.Playback) -> None:
+        """A probe that writes until its pipe, shrunk to one page, is full."""
+        process = subprocess.Popen(
+            ["sh", "-c", "head -c 100000 /dev/zero; sleep 5"], stdout=subprocess.PIPE
+        )
+        self.addCleanup(process.stdout.close)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        fcntl.fcntl(process.stdout, fcntl.F_SETPIPE_SZ, 4096)
+        playback.probe = MagicMock(process=process, started=time.monotonic())
+        time.sleep(0.3)
+
+    def test_a_full_small_pipe_brings_the_channel_back(self) -> None:
+        playback = self.playback()
+        self.streaming_probe(playback)
+        with (
+            patch.object(playback, "played_out", return_value=True),
+            patch.object(playback, "resume") as resume,
+        ):
+            playback.check_back()
+        resume.assert_called_once()
+
+    def test_a_viewer_who_went_back_keeps_the_old_stream_for_now(self) -> None:
+        playback = self.playback()
+        self.streaming_probe(playback)
+        probe = playback.probe
+        with (
+            patch.object(playback, "played_out", return_value=False),
+            patch.object(playback, "resume") as resume,
+        ):
+            playback.check_back()
+        resume.assert_not_called()
+        probe.stop.assert_called_once()
+        self.assertIsNone(playback.probe)
 
     def test_closing_after_an_error_stops_the_relay_and_its_streamlink(
         self,

@@ -1076,8 +1076,17 @@ class Playback:
             return
         # Bytes waiting, not just readable: a streamlink that found nothing
         # leaves a pipe that reads as end of file.
-        waiting = fcntl.ioctl(probe.process.stdout, termios.FIONREAD, b"\0" * 4)
-        if struct.unpack("i", waiting)[0] >= PROBE_BYTES:
+        # A pipe smaller than PROBE_BYTES (when the system ran short) counts
+        # as streaming once full.
+        stdout = probe.process.stdout
+        needed = min(PROBE_BYTES, fcntl.fcntl(stdout, fcntl.F_GETPIPE_SZ))
+        waiting = fcntl.ioctl(stdout, termios.FIONREAD, b"\0" * 4)
+        if struct.unpack("i", waiting)[0] >= needed:
+            if not self.played_out():
+                # Went back meanwhile: tried again once that has played.
+                self.drop_probe()
+                self.next_probe = now + 1
+                return
             self.probe = None
             # In case it fails; load() clears it once the stream plays.
             self.next_probe = now + RECONNECT_SECONDS
