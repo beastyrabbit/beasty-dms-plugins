@@ -4,7 +4,6 @@ stream taking its window over to the raided channel."""
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import shutil
@@ -450,51 +449,51 @@ class FollowTests(TempDirs):
             playback.check_back()
         start.assert_called_once()
 
+    def probe(self, playback: twitch_follows.Playback, script: str) -> MagicMock:
+        process = subprocess.Popen(["sh", "-c", script], stdout=subprocess.PIPE)
+        self.addCleanup(process.stdout.close)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        playback.probe = MagicMock(process=process, started=time.monotonic())
+        time.sleep(0.3)
+        return playback.probe
+
     def test_a_header_alone_does_not_bring_the_channel_back(self) -> None:
         playback = self.playback()
-        process = subprocess.Popen(
-            ["sh", "-c", "head -c 2000 /dev/zero; sleep 5"], stdout=subprocess.PIPE
-        )
-        self.addCleanup(process.stdout.close)
-        self.addCleanup(process.wait)
-        self.addCleanup(process.kill)
-        playback.probe = MagicMock(process=process, started=time.monotonic())
-        time.sleep(0.3)
-        with patch.object(playback, "resume") as resume:
-            playback.check_back()
-        resume.assert_not_called()
-        self.assertIsNotNone(playback.probe)
-
-    def streaming_probe(self, playback: twitch_follows.Playback) -> None:
-        """A probe that writes until its pipe, shrunk to one page, is full."""
-        process = subprocess.Popen(
-            ["sh", "-c", "head -c 100000 /dev/zero; sleep 5"], stdout=subprocess.PIPE
-        )
-        self.addCleanup(process.stdout.close)
-        self.addCleanup(process.wait)
-        self.addCleanup(process.kill)
-        fcntl.fcntl(process.stdout, fcntl.F_SETPIPE_SZ, 4096)
-        playback.probe = MagicMock(process=process, started=time.monotonic())
-        time.sleep(0.3)
-
-    def test_a_full_small_pipe_brings_the_channel_back(self) -> None:
-        playback = self.playback()
-        self.streaming_probe(playback)
+        probe = self.probe(playback, "head -c 2000 /dev/zero")
         with (
             patch.object(playback, "played_out", return_value=True),
             patch.object(playback, "resume") as resume,
         ):
             playback.check_back()
+            playback.check_back()
+        resume.assert_not_called()
+        probe.stop.assert_called_once()
+
+    def test_a_probe_still_streaming_after_a_while_brings_the_channel_back(
+        self,
+    ) -> None:
+        playback = self.playback()
+        self.probe(playback, "head -c 100000 /dev/zero; sleep 5")
+        with (
+            patch.object(twitch_follows, "PROBE_STEADY_SECONDS", 0),
+            patch.object(playback, "played_out", return_value=True),
+            patch.object(playback, "resume") as resume,
+        ):
+            playback.check_back()  # sees the bytes
+            resume.assert_not_called()
+            playback.check_back()
         resume.assert_called_once()
 
     def test_a_viewer_who_went_back_keeps_the_old_stream_for_now(self) -> None:
         playback = self.playback()
-        self.streaming_probe(playback)
-        probe = playback.probe
+        probe = self.probe(playback, "head -c 100000 /dev/zero; sleep 5")
         with (
+            patch.object(twitch_follows, "PROBE_STEADY_SECONDS", 0),
             patch.object(playback, "played_out", return_value=False),
             patch.object(playback, "resume") as resume,
         ):
+            playback.check_back()
             playback.check_back()
         resume.assert_not_called()
         probe.stop.assert_called_once()
@@ -666,6 +665,9 @@ for i in range(0, len(data), 32768):
     sys.stdout.buffer.write(data[i:i + 32768]); sys.stdout.buffer.flush()
     time.sleep(0.05)
 open(runtime + f"/{{channel}}.done", "a").close()
+# Done writing, but still running a moment, as a live streamlink does.
+sys.stdout.close()
+time.sleep(1)
 """
         )
         self.mpv = bin_dir / "mpv"
@@ -793,6 +795,7 @@ open(runtime + f"/{{channel}}.done", "a").close()
             ),
             patch.object(twitch_follows, "END_GRACE_SECONDS", grace),
             patch.object(twitch_follows, "RECONNECT_SECONDS", reconnect),
+            patch.object(twitch_follows, "PROBE_STEADY_SECONDS", 0.3),
             patch.object(twitch_follows, "notify") as notify,
         ):
             watcher.start()

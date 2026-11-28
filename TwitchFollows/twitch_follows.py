@@ -140,9 +140,9 @@ ENDED_PROPERTY = "user-data/twitch-stream-ended"
 # and how long that streamlink may take to bring the stream.
 RECONNECT_SECONDS = 20
 PROBE_SECONDS = 60
-# What a streamlink must have written to count as streaming: more than an
-# MP4 header alone.
-PROBE_BYTES = 32 * 1024
+# A streamlink counts as streaming once it has written and still runs this
+# long after: one that writes an MP4 header and quits doesn't.
+PROBE_STEADY_SECONDS = 2
 # mpv has played out what it buffered with less than this left (as in
 # twitch_end.lua); only then does the channel coming back replace it.
 PLAYED_OUT_SECONDS = 1
@@ -972,6 +972,8 @@ class Playback:
         self.probe: stream_quality.Source | None = None
         self.next_probe: float | None = None
         self.probes = 0
+        # When the probe first had bytes waiting.
+        self.probe_data_at: float | None = None
 
     def start_overlay(self, login: str, hidden: bool, loading: bool = True) -> None:
         # uv provides the Pillow the overlay declares inline, so emotes show
@@ -1073,15 +1075,19 @@ class Playback:
             self.probe = stream_quality.Source.start(
                 self.streamlink, login, selection, log
             )
+            self.probe_data_at = None
+            return
+        if probe.process.poll() is not None or now - probe.started > PROBE_SECONDS:
+            self.drop_probe()  # still offline, or stuck
+            self.next_probe = now + RECONNECT_SECONDS
             return
         # Bytes waiting, not just readable: a streamlink that found nothing
         # leaves a pipe that reads as end of file.
-        # A pipe smaller than PROBE_BYTES (when the system ran short) counts
-        # as streaming once full.
-        stdout = probe.process.stdout
-        needed = min(PROBE_BYTES, fcntl.fcntl(stdout, fcntl.F_GETPIPE_SZ))
-        waiting = fcntl.ioctl(stdout, termios.FIONREAD, b"\0" * 4)
-        if struct.unpack("i", waiting)[0] >= needed:
+        if self.probe_data_at is None:
+            waiting = fcntl.ioctl(probe.process.stdout, termios.FIONREAD, b"\0" * 4)
+            if struct.unpack("i", waiting)[0] > 0:
+                self.probe_data_at = now
+        elif now - self.probe_data_at >= PROBE_STEADY_SECONDS:
             if not self.played_out():
                 # Went back meanwhile: tried again once that has played.
                 self.drop_probe()
@@ -1091,9 +1097,6 @@ class Playback:
             # In case it fails; load() clears it once the stream plays.
             self.next_probe = now + RECONNECT_SECONDS
             self.resume(probe)
-        elif probe.process.poll() is not None or now - probe.started > PROBE_SECONDS:
-            self.drop_probe()  # still offline, or stuck
-            self.next_probe = now + RECONNECT_SECONDS
 
     def played_out(self) -> bool:
         """Whether mpv has played what it buffered, so a stream loaded now
