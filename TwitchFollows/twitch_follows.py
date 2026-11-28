@@ -21,9 +21,11 @@ import re
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import urllib.error
 import urllib.parse
@@ -127,8 +129,23 @@ return "ok"
 RAIDS_FILE = "twitch-follows-raids.json"
 RAIDS_LOCK = "twitch-follows-raids.lock"
 RAID_TTL_SECONDS = 120
-# How long a stream that ended waits on its last picture for its raid.
-RAID_GRACE_SECONDS = 20
+# A stream that ended keeps its window, on the last picture, and its chat:
+# twitch_end.lua closes it after this long unless the user keeps it open.
+# Meanwhile a late raid or the channel coming back takes the window over.
+END_GRACE_SECONDS = 60
+# For twitch_end.lua: how many times the stream has ended while it has, 0
+# while it plays. Counted, so an end right after another still counts down.
+ENDED_PROPERTY = "user-data/twitch-stream-ended"
+# How often a window whose stream ended starts streamlink to see if it's back,
+# and how long that streamlink may take to bring the stream.
+RECONNECT_SECONDS = 20
+PROBE_SECONDS = 60
+# A streamlink counts as streaming once it has written and still runs this
+# long after: one that writes an MP4 header and quits doesn't.
+PROBE_STEADY_SECONDS = 2
+# mpv has played out what it buffered with less than this left (as in
+# twitch_end.lua); only then does the channel coming back replace it.
+PLAYED_OUT_SECONDS = 1
 # How often a stream that follows raids makes sure a watcher runs.
 WATCHER_CHECK_SECONDS = 30
 # A running --raid-login's progress for the settings page: its pid and the
@@ -937,20 +954,26 @@ class Playback:
         self.viewer: subprocess.Popen | None = None
         self.follow = follow
         self.chat_always_in_mpv = chat_always_in_mpv
-        self.hold_seconds = RAID_GRACE_SECONDS if follow else 0
         self.channel: Channel | None = None
         self.overlay: subprocess.Popen | None = None
         self.joined: tuple[dict[str, Any], subprocess.Popen | None] | None = None
         self.handled: set[str] = set()
-        # Set when the channel raided where this window can't follow: no
-        # other raid will come, so its end needs no wait.
-        self.raided_away = False
         # Set when a follow failed after mpv had left the old channel, which
         # closes the window; that was already reported.
         self.gave_up = False
         self.fifos = 0
         self.watcher: subprocess.Popen | None = None
         self.watcher_checked = -math.inf
+        # What mpv was last told about the stream's end (ENDED_PROPERTY), the
+        # ends so far, and while it has ended, the streamlink trying the
+        # channel again or when the next one starts.
+        self.end_shown = 0
+        self.ends = 0
+        self.probe: stream_quality.Source | None = None
+        self.next_probe: float | None = None
+        self.probes = 0
+        # When the probe first had bytes waiting.
+        self.probe_data_at: float | None = None
 
     def start_overlay(self, login: str, hidden: bool, loading: bool = True) -> None:
         # uv provides the Pillow the overlay declares inline, so emotes show
@@ -996,15 +1019,119 @@ class Playback:
                 return True
             chat_sync.step(current)
             self.check_raids(current)
-            if self.channel.relay.source_ended:
-                # Ended: mpv waits for a raid on the last picture, nothing to
-                # switch.
-                if self.raided_away:
-                    self.channel.relay.stop()
+            relay = self.channel.relay
+            if relay.source_ended and relay.delivered:
+                # mpv waits on the last picture until twitch_end.lua or the
+                # user closes it, a raid comes or the channel is back.
+                self.show_ended()
+                self.check_back()
                 time.sleep(0.2)
             else:
                 self.channel.switcher.step(0.2)
         return False
+
+    def show_ended(self) -> None:
+        """Tells twitch_end.lua that the stream has ended, which starts its
+        countdown to closing the window; load() tells it when one plays."""
+        if self.end_shown:
+            return
+        try:
+            mpv = connect_ipc(self.ipc_path)
+        except OSError:
+            return  # tried again on the next round
+        with contextlib.closing(mpv.sock):
+            mpv.send(["set_property", ENDED_PROPERTY, self.ends + 1])
+        self.ends += 1
+        self.end_shown = self.ends
+        self.next_probe = time.monotonic() + RECONNECT_SECONDS
+        # Nothing is switched any more: a quality switch under way would
+        # leave its streamlink stuck on a pipe nobody reads.
+        switcher = self.channel.switcher
+        if switcher.pending:
+            switcher.drop_pending()
+        # A splice the last step didn't see leaves its old source running.
+        spliced = self.channel.relay.take_spliced()
+        if spliced:
+            spliced[1].stop()
+        self.channel.relay.current.process.poll()  # reaps it
+
+    def check_back(self) -> None:
+        """While the stream has ended, starts streamlink for the channel now
+        and then; once one streams, the window plays it again."""
+        probe = self.probe
+        now = time.monotonic()
+        if probe is None:
+            if self.next_probe is None or now < self.next_probe:
+                return
+            if not self.played_out():
+                self.next_probe = now + 1  # the viewer is behind live
+                return
+            self.probes += 1
+            login = self.channel.login
+            selection, _ = raid_selection(
+                self.quality, self.channel.switcher.policy.audio_only
+            )
+            log = runtime_path(f"twitch-follows-{login}-back{self.probes}.log")
+            self.probe = stream_quality.Source.start(
+                self.streamlink, login, selection, log
+            )
+            self.probe_data_at = None
+            return
+        if probe.process.poll() is not None or now - probe.started > PROBE_SECONDS:
+            self.drop_probe()  # still offline, or stuck
+            self.next_probe = now + RECONNECT_SECONDS
+            return
+        # Bytes waiting, not just readable: a streamlink that found nothing
+        # leaves a pipe that reads as end of file.
+        if self.probe_data_at is None:
+            waiting = fcntl.ioctl(probe.process.stdout, termios.FIONREAD, b"\0" * 4)
+            if struct.unpack("i", waiting)[0] > 0:
+                self.probe_data_at = now
+        elif now - self.probe_data_at >= PROBE_STEADY_SECONDS:
+            if not self.played_out():
+                # Went back meanwhile: tried again once that has played.
+                self.drop_probe()
+                self.next_probe = now + 1
+                return
+            self.probe = None
+            # In case it fails; load() clears it once the stream plays.
+            self.next_probe = now + RECONNECT_SECONDS
+            self.resume(probe)
+
+    def played_out(self) -> bool:
+        """Whether mpv has played what it buffered, so a stream loaded now
+        takes nothing from a viewer who paused or went back."""
+        try:
+            mpv = connect_ipc(self.ipc_path)
+        except OSError:
+            return False
+        with contextlib.closing(mpv.sock):
+            try:
+                reply = ipc_request(mpv, ["get_property", "demuxer-cache-duration"])
+            except (OSError, EOFError):
+                return False
+        left = reply.get("data")
+        return not isinstance(left, (int, float)) or left < PLAYED_OUT_SECONDS
+
+    def drop_probe(self) -> None:
+        if self.probe:
+            self.probe.stop()
+            self.probe = None
+
+    def resume(self, source: stream_quality.Source) -> None:
+        """The channel is back: the window plays it from a new FIFO, keeping
+        its chat."""
+        try:
+            mpv = connect_ipc(self.ipc_path)
+        except OSError:
+            source.stop()
+            return
+        with contextlib.closing(mpv.sock):
+            try:
+                self.load(mpv, self.channel.login, source, self.channel.lock)
+            except FollowError:
+                return
+            mpv.send(["show-text", "The stream is back", 4000])
 
     def check_raids(self, group: dict[str, Any] | None) -> None:
         if not self.follow:
@@ -1017,10 +1144,21 @@ class Playback:
     def close(self, log_path: Path, lock: IO) -> None:
         """Ends what play() and raids started: the switcher, the stream's place
         in its group (its chat tab closes with it, and the chat window with
-        the group's last stream), the chat overlay and the channel lock."""
+        the group's last stream), the chat overlay and the channel lock, and
+        the relay and its streamlink when an error skipped play()'s ending."""
+        self.drop_probe()
         channel = self.channel
         if channel:
-            channel.switcher.close()
+            try:
+                channel.relay.stop()
+                # Settles a switch under way: drops the new streamlink or,
+                # once spliced, stops the old one.
+                channel.switcher.close()
+            finally:
+                process = channel.relay.current.process
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
             if channel.switcher.source.log_path != log_path:
                 channel.switcher.source.log_path.unlink(missing_ok=True)
             if channel.fifo:
@@ -1073,30 +1211,23 @@ class Playback:
         lock = try_lock(watch_lock(target))
         if lock is None:
             # The raided channel plays already: this one ends as before.
-            self.raided_away = True
             return
         try:
             self.switch_to(target, str(raid.get("name") or target), lock, group)
         except FollowError as error:
             lock.close()
             notify(f"Could not follow the raid to {target}", str(error))
-            self.raided_away = True
 
     def switch_to(
         self, target: str, name: str, lock: IO, group: dict[str, Any] | None
     ) -> None:
-        """Plays the raided channel in this window: mpv loads it from a new
-        FIFO (another channel can't be spliced into the running stream), then
-        the old channel's relay, switcher, overlay and chat tab go."""
+        """Plays the raided channel in this window (see load), with its own
+        chat overlay and chat tab instead of the old channel's."""
         from chat_overlay import IMAGE_OVERLAY_ID
 
+        self.drop_probe()
         old = self.channel
-        self.fifos += 1
-        fifo = runtime_path(f"twitch-follows-{os.getpid()}-{self.fifos}.ts")
-        fifo.unlink(missing_ok=True)
-        os.mkfifo(fifo, 0o600)
-        audio_only = old.switcher.policy.audio_only
-        selection, preferred = raid_selection(self.quality, audio_only)
+        selection, _ = raid_selection(self.quality, old.switcher.policy.audio_only)
         source = stream_quality.Source.start(
             self.streamlink,
             target,
@@ -1107,50 +1238,75 @@ class Playback:
             mpv = connect_ipc(self.ipc_path)
         except OSError:
             source.stop()
-            fifo.unlink(missing_ok=True)
             raise FollowError("mpv is not reachable.") from None
         with contextlib.closing(mpv.sock):
-            reply = ipc_request(mpv, ["loadfile", str(fifo), "replace"])
-            if reply.get("error") != "success":
-                source.stop()
-                fifo.unlink(missing_ok=True)
-                raise FollowError("mpv did not load the stream.")
-            # From here mpv no longer plays the old channel.
-            output = open_fifo(fifo, self.viewer)
-            if output is None:
-                source.stop()
-                fifo.unlink(missing_ok=True)
-                self.gave_up = True
-                self.viewer.terminate()
-                raise FollowError("mpv did not open the stream.")
-            relay = stream_quality.Relay(output, source, self.hold_seconds)
-            relay.start()
-            # The old channel's still (shown under audio only) and its chat.
-            mpv.send(["overlay-remove", stream_quality.FRAME_OVERLAY_ID])
-            old.switcher.close()
-            old.relay.stop()
-            old.relay.current.stop()
-            if old.fifo:
-                old.fifo.unlink(missing_ok=True)
-            policy = stream_quality.QualityPolicy(preferred, audio_only=audio_only)
-            policy.max_quality = old.switcher.policy.max_quality
-            switcher = stream_quality.Switcher(
-                self.streamlink, target, self.ipc_path, policy, relay
-            )
-            self.channel = Channel(target, lock, relay, switcher, time.time(), fifo)
+            self.load(mpv, target, source, lock)
             self.stop_overlay()
             mpv.send(["overlay-remove", IMAGE_OVERLAY_ID])
             # The group's chat mode, which the chat button keeps up to date;
             # without Chatterino, that is whether the chat is shown at all.
             in_mpv = bool(group.get("chatInMpv")) if group else self.chat_always_in_mpv
             self.start_overlay(target, hidden=not in_mpv, loading=False)
-            # Video back on in case audio only had turned it off; an audio-only
-            # stream simply has none.
-            mpv.send(["set_property", "vid", "auto"])
             mpv.send(["set_property", "force-media-title", name])
             mpv.send(["show-text", f"Following the raid to {name}", 4000])
         self.rename(old.login, target)
         old.lock.close()
+
+    def load(self, mpv, login: str, source: stream_quality.Source, lock: IO) -> None:
+        """Plays source in this window: mpv loads it from a new FIFO (another
+        broadcast can't be spliced into the running stream), keeping the
+        window's quality choices, then the old channel's relay and switcher
+        go. Stops source when that fails."""
+        old = self.channel
+        self.fifos += 1
+        fifo = runtime_path(f"twitch-follows-{os.getpid()}-{self.fifos}.ts")
+        try:
+            fifo.unlink(missing_ok=True)
+            os.mkfifo(fifo, 0o600)
+            # The end's countdown stops first, so it can't close the window
+            # under the new stream. Should this fail, wait() starts another.
+            mpv.send(["set_property", ENDED_PROPERTY, 0])
+            self.end_shown = 0
+            reply = ipc_request(mpv, ["loadfile", str(fifo), "replace"])
+            if reply.get("error") != "success":
+                raise FollowError("mpv did not load the stream.")
+            # From here mpv no longer plays the old channel.
+            output = open_fifo(fifo, self.viewer)
+            if output is None:
+                self.gave_up = True
+                self.viewer.terminate()
+                raise FollowError("mpv did not open the stream.")
+        except (OSError, EOFError, FollowError) as error:
+            source.stop()
+            fifo.unlink(missing_ok=True)
+            if isinstance(error, FollowError):
+                raise
+            raise FollowError("mpv has closed.") from None
+        relay = stream_quality.Relay(output, source, keep_open=True)
+        relay.start()
+        old.switcher.close()
+        old.relay.stop()
+        old.relay.current.stop()
+        if old.fifo:
+            old.fifo.unlink(missing_ok=True)
+        audio_only = old.switcher.policy.audio_only
+        _, preferred = raid_selection(self.quality, audio_only)
+        policy = stream_quality.QualityPolicy(preferred, audio_only=audio_only)
+        policy.max_quality = old.switcher.policy.max_quality
+        switcher = stream_quality.Switcher(
+            self.streamlink, login, self.ipc_path, policy, relay
+        )
+        # Owned from here: should mpv go now, close() ends it all.
+        # The same channel back keeps telling its raids from older ones as
+        # before.
+        started = old.started if login == old.login else time.time()
+        self.channel = Channel(login, lock, relay, switcher, started, fifo)
+        self.next_probe = None
+        # The old channel's still, shown under audio only, and video back on
+        # in case audio only had turned it off; an audio-only stream simply
+        # has none.
+        mpv.send(["overlay-remove", stream_quality.FRAME_OVERLAY_ID])
+        mpv.send(["set_property", "vid", "auto"])
 
     def rename(self, old: str, target: str) -> None:
         """The stream keeps its place in the group under the new channel, and
@@ -1247,6 +1403,8 @@ def play(
         f"--demuxer-max-back-bytes={REWIND_BUFFER}",
         f"--script={Path(__file__).with_name('twitch_buttons.lua')}",
         f"--script={Path(__file__).with_name('twitch_audio.lua')}",
+        f"--script={Path(__file__).with_name('twitch_end.lua')}",
+        f"--script-opts-append=twitch_end-close_seconds={END_GRACE_SECONDS}",
     ]
     # Without a Chatterino, mpv is the only place for chat. The chat relay
     # always runs, because it also handles `End` (jump to live).
@@ -1270,7 +1428,7 @@ def play(
             stderr=subprocess.DEVNULL,
         )
         playback.viewer = viewer
-        relay = stream_quality.Relay(viewer.stdin, first, playback.hold_seconds)
+        relay = stream_quality.Relay(viewer.stdin, first, keep_open=True)
         relay.start()
         policy = stream_quality.QualityPolicy(
             selection.split(","), audio_only=quality == "audio_only"
@@ -1280,14 +1438,15 @@ def play(
         playback.joined = join_group(login, viewer, group_id, chat_in_mpv, follow)
         chat_sync = ChatSync(ipc_path, playback.joined[0]["id"], chat_in_mpv)
         # Whichever ends first decides: mpv closed by the user is normal, the
-        # stream ending first means it failed or ended. After a quality
+        # stream ending first means it failed or ended (a stream that played
+        # keeps mpv until it closes, see Playback.wait). After a quality
         # switch, that is the streamlink switched to; after a raid, the raided
         # channel's.
         closed_with_chat = playback.wait(chat_sync) or playback.gave_up
         relay = playback.channel.relay
         source = relay.current.process
         source_ended_first = relay.source_ended
-        # Ends a hold for a raid that won't come now.
+        # Ends the hold of a stream that ended.
         relay.stop(timeout=0)
         if source_ended_first:
             viewer.wait()  # the relay closed its input

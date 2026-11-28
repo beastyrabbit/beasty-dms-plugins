@@ -3,6 +3,7 @@ stream taking its window over to the raided channel."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -427,7 +428,89 @@ class FollowTests(TempDirs):
         ):
             playback.follow_raid({"to": "small", "name": "Small"}, None)
         switch.assert_not_called()
-        self.assertTrue(playback.raided_away)
+        self.assertEqual(playback.channel.login, "big")
+
+    def test_the_channel_is_tried_again_only_once_mpv_has_played_out(self) -> None:
+        playback = self.playback()
+        playback.channel.switcher.policy.audio_only = False
+        playback.next_probe = 0
+        with (
+            patch.object(playback, "played_out", return_value=False),
+            patch.object(twitch_follows.stream_quality.Source, "start") as start,
+        ):
+            playback.check_back()
+        start.assert_not_called()
+        self.assertGreater(playback.next_probe, 0)
+        playback.next_probe = 0
+        with (
+            patch.object(playback, "played_out", return_value=True),
+            patch.object(twitch_follows.stream_quality.Source, "start") as start,
+        ):
+            playback.check_back()
+        start.assert_called_once()
+
+    def probe(self, playback: twitch_follows.Playback, script: str) -> MagicMock:
+        process = subprocess.Popen(["sh", "-c", script], stdout=subprocess.PIPE)
+        self.addCleanup(process.stdout.close)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        playback.probe = MagicMock(process=process, started=time.monotonic())
+        time.sleep(0.3)
+        return playback.probe
+
+    def test_a_header_alone_does_not_bring_the_channel_back(self) -> None:
+        playback = self.playback()
+        probe = self.probe(playback, "head -c 2000 /dev/zero")
+        with (
+            patch.object(playback, "played_out", return_value=True),
+            patch.object(playback, "resume") as resume,
+        ):
+            playback.check_back()
+            playback.check_back()
+        resume.assert_not_called()
+        probe.stop.assert_called_once()
+
+    def test_a_probe_still_streaming_after_a_while_brings_the_channel_back(
+        self,
+    ) -> None:
+        playback = self.playback()
+        self.probe(playback, "head -c 100000 /dev/zero; sleep 5")
+        with (
+            patch.object(twitch_follows, "PROBE_STEADY_SECONDS", 0),
+            patch.object(playback, "played_out", return_value=True),
+            patch.object(playback, "resume") as resume,
+        ):
+            playback.check_back()  # sees the bytes
+            resume.assert_not_called()
+            playback.check_back()
+        resume.assert_called_once()
+
+    def test_a_viewer_who_went_back_keeps_the_old_stream_for_now(self) -> None:
+        playback = self.playback()
+        probe = self.probe(playback, "head -c 100000 /dev/zero; sleep 5")
+        with (
+            patch.object(twitch_follows, "PROBE_STEADY_SECONDS", 0),
+            patch.object(playback, "played_out", return_value=False),
+            patch.object(playback, "resume") as resume,
+        ):
+            playback.check_back()
+            playback.check_back()
+        resume.assert_not_called()
+        probe.stop.assert_called_once()
+        self.assertIsNone(playback.probe)
+
+    def test_closing_after_an_error_stops_the_relay_and_its_streamlink(
+        self,
+    ) -> None:
+        # As when mpv goes away right after a handoff, before play() ends it.
+        playback = self.playback()
+        playback.joined = None
+        process = playback.channel.relay.current.process
+        process.poll.return_value = None
+        playback.close(self.runtime / "big.log", MagicMock())
+        playback.channel.relay.stop.assert_called_once_with()
+        process.kill.assert_called_once()
+        process.wait.assert_called_once()
 
     def test_a_failed_follow_says_so_and_frees_the_raided_channel(self) -> None:
         playback = self.playback()
@@ -565,19 +648,28 @@ class RealMpvTests(TempDirs):
         bin_dir = self.runtime / "bin"
         bin_dir.mkdir()
         # streamlink writes the channel's file slowly, like a live stream, and
-        # leaves a mark when it has ended.
+        # leaves a mark when it has ended; it finds nothing once the channel
+        # is marked offline.
         self.streamlink = bin_dir / "streamlink"
         self.streamlink.write_text(
             f"""#!{sys.executable}
-import sys, time
+import os, sys, time
 runtime = {str(self.runtime)!r}
 channel = sys.argv[3].rsplit("/", 1)[1]
 open(runtime + "/streamlink.args", "a").write(channel + "\\n")
+if os.path.exists(runtime + f"/{{channel}}.offline"):
+    sys.stderr.write("error: No playable streams found on this URL\\n")
+    sys.exit(1)
 data = open(runtime + f"/{{channel}}.ts", "rb").read()
 for i in range(0, len(data), 32768):
     sys.stdout.buffer.write(data[i:i + 32768]); sys.stdout.buffer.flush()
     time.sleep(0.05)
 open(runtime + f"/{{channel}}.done", "a").close()
+# Done writing, but still running a moment, as a live streamlink does.
+sys.stdout.buffer.flush()
+os.close(1)
+time.sleep(1)
+os._exit(0)
 """
         )
         self.mpv = bin_dir / "mpv"
@@ -586,6 +678,16 @@ open(runtime + f"/{{channel}}.done", "a").close()
         )
         for script in (self.streamlink, self.mpv):
             script.chmod(0o755)
+
+    def act(self, socket: Path, source: str, target: str, number: int) -> None:
+        if target == "keep":
+            connection = twitch_follows.connect_ipc(socket)
+            with connection.sock:
+                connection.send(["script-message", "twitch-keep-open"])
+        elif target == "offline":
+            (self.runtime / f"{source}.offline").touch()
+        else:
+            self.raid(source, target, number)
 
     def raid(self, source: str, target: str, number: int) -> None:
         raids = twitch_follows.read_raids()
@@ -600,15 +702,25 @@ open(runtime + f"/{{channel}}.done", "a").close()
         )
 
     def play(
-        self, raids: list[tuple[str, str, str]], grace: float, hide_chat: bool = False
+        self,
+        raids: list[tuple[str, str, str]],
+        grace: float,
+        hide_chat: bool = False,
+        reconnect: float = 60,
     ) -> list[int]:
         """Watches big; each raid (when, source, target) is sent once mpv shows
-        that width ("320") or once that channel's streamlink ended ("done:big"),
-        after hiding the chat with the chat button when hide_chat is set.
-        Returns the widths mpv showed, in order; self.overlays says for each
-        chat overlay started whether it started hidden."""
+        that width ("320"), once that channel's streamlink ended ("done:big")
+        or once the window counts down to closing ("closing"), after hiding
+        the chat with the chat button when hide_chat is set. The target
+        "keep" presses the keep-open button instead, and "offline" takes the
+        source channel offline. Returns the widths mpv showed, in order;
+        self.played has how far mpv played each path, self.counted where on
+        each path the countdown started, and self.overlays says for each chat overlay
+        started whether it started hidden."""
         widths: list[int] = []
         self.overlays: list[bool] = []
+        self.played: dict[str, float] = {}
+        self.counted: dict[str, float] = {}
         pending = list(raids)
         finished = threading.Event()
 
@@ -620,21 +732,34 @@ open(runtime + f"/{{channel}}.done", "a").close()
                 try:
                     connection = twitch_follows.connect_ipc(sockets[0])
                     with connection.sock:
-                        reply = twitch_follows.ipc_request(
-                            connection, ["get_property", "width"], timeout=1
+                        width, path, position, closing = (
+                            twitch_follows.ipc_request(
+                                connection, ["get_property", name], timeout=1
+                            ).get("data")
+                            for name in (
+                                "width",
+                                "path",
+                                "time-pos",
+                                "user-data/twitch-closing",
+                            )
                         )
-                except (IndexError, OSError):
+                except (IndexError, OSError, EOFError):
                     time.sleep(0.1)
                     continue
-                width = reply.get("data")
                 if width and (not widths or widths[-1] != width):
                     widths.append(width)
+                if path:
+                    self.played[path] = max(self.played.get(path, 0), position or 0)
+                    if closing is True:
+                        self.counted.setdefault(path, position or 0)
                 if not pending:
                     time.sleep(0.1)
                     continue
                 when, source, target = pending[0]
                 if when.startswith("done:"):
                     ready = (self.runtime / f"{when[5:]}.done").exists()
+                elif when == "closing":
+                    ready = closing is True
                 else:
                     ready = width == int(when)
                 if ready:
@@ -643,9 +768,16 @@ open(runtime + f"/{{channel}}.done", "a").close()
                     if hide_chat:
                         group = twitch_follows.load_groups()[0]["id"]
                         twitch_follows.set_chat_mode(group, in_mpv=False)
-                    self.raid(source, target, number)
+                    self.act(sockets[0], source, target, number)
                     pending.pop(0)
                 time.sleep(0.1)
+            if not finished.is_set():
+                # Hung: close mpv, so the test fails instead of waiting.
+                with contextlib.suppress(IndexError, OSError, EOFError):
+                    sockets = list(self.runtime.glob("twitch-follows-big-*.sock"))
+                    connection = twitch_follows.connect_ipc(sockets[0])
+                    with connection.sock:
+                        connection.send(["quit"])
 
         watcher = threading.Thread(target=watch_mpv, daemon=True)
         tools = {"streamlink": str(self.streamlink), "mpv": str(self.mpv)}
@@ -663,7 +795,9 @@ open(runtime + f"/{{channel}}.done", "a").close()
                     setattr(playback, "overlay", subprocess.Popen(["sleep", "30"])),
                 ),
             ),
-            patch.object(twitch_follows, "RAID_GRACE_SECONDS", grace),
+            patch.object(twitch_follows, "END_GRACE_SECONDS", grace),
+            patch.object(twitch_follows, "RECONNECT_SECONDS", reconnect),
+            patch.object(twitch_follows, "PROBE_STEADY_SECONDS", 0.3),
             patch.object(twitch_follows, "notify") as notify,
         ):
             watcher.start()
@@ -706,6 +840,41 @@ open(runtime + f"/{{channel}}.done", "a").close()
         self.assertEqual(widths[0], 320)
         self.assertIn(640, widths)
         self.assertEqual(self.streamlink_runs(), ["big", "small"])
+
+    def test_an_ended_stream_waits_and_its_window_closes_on_its_own(self) -> None:
+        started = time.monotonic()
+        self.play([], grace=3)
+        # The countdown starts once mpv has played the 4 seconds it buffered,
+        # not when streamlink is done (long before that).
+        self.assertGreater(self.counted["-"], 2.5)
+        # Played with about a second left, then 3 seconds of countdown.
+        self.assertGreater(time.monotonic() - started, 5)
+        self.assertEqual(self.streamlink_runs(), ["big"])
+
+    def test_a_window_kept_open_plays_the_channel_again_once_it_is_back(
+        self,
+    ) -> None:
+        # Kept open, the window outlasts the countdown (which starts once mpv
+        # has played its 4 seconds) and is still there when streamlink is
+        # tried again; the next end counts down afresh and closes it before
+        # another try.
+        self.play([("closing", "big", "keep")], grace=2, reconnect=8)
+        self.assertEqual(self.streamlink_runs(), ["big", "big"])
+        # stdin first, then the channel again from a FIFO, played and
+        # counted down on.
+        paths = list(self.played)
+        self.assertEqual(len(paths), 2)
+        self.assertTrue(paths[1].endswith(".ts"))
+        self.assertGreater(self.played[paths[1]], 1)
+        self.assertEqual(set(self.counted), set(paths))
+
+    def test_an_offline_channel_is_tried_again_until_the_window_closes(
+        self,
+    ) -> None:
+        self.play([("done:big", "big", "offline")], grace=4, reconnect=1)
+        runs = self.streamlink_runs()
+        self.assertGreater(len(runs), 1)
+        self.assertEqual(set(runs), {"big"})
 
     def test_raids_can_lead_back_to_the_first_channel(self) -> None:
         widths = self.play([("320", "big", "small"), ("640", "small", "big")], grace=1)

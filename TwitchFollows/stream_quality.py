@@ -834,15 +834,15 @@ class Relay:
     thread. The other thread offers, releases or withdraws a pending source and
     collects finished splices.
 
-    When the current source ends, the relay can keep mpv's input open for
-    `hold_seconds` instead of closing it at once: mpv waits on the last picture
-    meanwhile, so a raid announced just after the broadcast ended can still
-    take the window over. `stop()` ends the relay at any time, even while mpv
+    When the current source ends, the relay can keep mpv's input open
+    (`keep_open`) until `stop()` instead of closing it at once: mpv waits on
+    the last picture meanwhile, so a late raid or the channel coming back can
+    still take the window over. `stop()` ends the relay at any time, even while mpv
     has stopped reading (writes to a pipe or FIFO don't block).
     """
 
     def __init__(
-        self, output: BinaryIO, source: Source, hold_seconds: float = 0
+        self, output: BinaryIO, source: Source, keep_open: bool = False
     ) -> None:
         self.output = output
         # A real pipe is written without blocking, so stop() can't hang on a
@@ -852,7 +852,7 @@ class Relay:
             os.set_blocking(self.fd, False)
         except (AttributeError, OSError, ValueError):
             self.fd = None
-        self.hold_seconds = hold_seconds
+        self.keep_open = keep_open
         # Only a stream that played is held: one that fails to start ends
         # (and says why) at once.
         self.delivered = False
@@ -949,8 +949,8 @@ class Relay:
                 except (OSError, ValueError):
                     continue  # a withdrawn source's pipe closed under us
                 if self.relay_ready(pipes, ready):
-                    if self.delivered:
-                        self.stopping.wait(self.hold_seconds)
+                    if self.delivered and self.keep_open:
+                        self.stopping.wait()
                     return
                 # A held segment start may have waited long enough.
                 with self.lock:

@@ -660,7 +660,7 @@ class RelayTests(unittest.TestCase):
     def test_holds_mpvs_input_open_after_the_stream_ends_until_stopped(self) -> None:
         old, old_in = self.pipe_source("1080p60")
         output = Collector()
-        relay = stream_quality.Relay(output, old, hold_seconds=30)
+        relay = stream_quality.Relay(output, old, keep_open=True)
         relay.start()
         old_in.write(segment(10, b"A"))
         old_in.close()
@@ -677,15 +677,15 @@ class RelayTests(unittest.TestCase):
         # As when streamlink fails at once: the error shows without a wait.
         old, old_in = self.pipe_source("1080p60")
         output = Collector()
-        relay = stream_quality.Relay(output, old, hold_seconds=30)
+        relay = stream_quality.Relay(output, old, keep_open=True)
         relay.start()
         old_in.close()
         self.assertTrue(relay.finished.wait(2))
 
-    def test_the_hold_ends_on_its_own(self) -> None:
+    def test_without_hold_mpvs_input_closes_when_the_stream_ends(self) -> None:
         old, old_in = self.pipe_source("1080p60")
         output = Collector()
-        relay = stream_quality.Relay(output, old, hold_seconds=0.2)
+        relay = stream_quality.Relay(output, old)
         relay.start()
         old_in.write(segment(10, b"A"))
         old_in.close()

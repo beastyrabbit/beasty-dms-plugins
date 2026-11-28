@@ -394,6 +394,15 @@ class LaunchTests(unittest.TestCase):
         no_chat = patch.object(twitch_follows, "chatterino_command", return_value=None)
         no_chat.start()
         self.addCleanup(no_chat.stop)
+        # The fake mpv runs no twitch_end.lua: a stream that ended closes at
+        # once, as when its countdown ran out.
+        close_at_end = patch.object(
+            twitch_follows.Playback,
+            "show_ended",
+            lambda playback: playback.channel.relay.stop(),
+        )
+        close_at_end.start()
+        self.addCleanup(close_at_end.stop)
 
     def test_rejects_invalid_channel_names(self) -> None:
         with patch.object(twitch_follows.subprocess, "run") as run:
