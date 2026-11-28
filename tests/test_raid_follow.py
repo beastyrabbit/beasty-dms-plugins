@@ -666,8 +666,10 @@ for i in range(0, len(data), 32768):
     time.sleep(0.05)
 open(runtime + f"/{{channel}}.done", "a").close()
 # Done writing, but still running a moment, as a live streamlink does.
-sys.stdout.close()
+sys.stdout.buffer.flush()
+os.close(1)
 time.sleep(1)
+os._exit(0)
 """
         )
         self.mpv = bin_dir / "mpv"
